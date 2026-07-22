@@ -52,7 +52,7 @@ from openpyxl.utils import get_column_letter
 # MIT1X407
 # MIT2X5300a
 #
-# Falls eure Raumnummern später anders aufgebaut sind, muss nur dieses Muster
+# Falls die Raumnummern später anders aufgebaut sind, muss nur dieses Muster
 # angepasst werden.
 ROOM_RE = re.compile(r"\bMIT\d+[A-Z]\d+[a-z]?\b")
 
