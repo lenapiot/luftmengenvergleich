@@ -43,10 +43,6 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
-# =============================================================================
-# 1. EINSTELLUNGEN
-# =============================================================================
-
 import re
 
 from config.settings import(
@@ -57,6 +53,16 @@ from config.settings import(
     PDF_STATUS_COLORS,
 )
 
+
+from ui.dialogs import(
+    choose_pdf,
+    choose_output_folder,
+    validate_pdf,
+)
+
+# =============================================================================
+# 1. EINSTELLUNGEN (settings.py)
+# =============================================================================
 
 # =============================================================================
 # 2. DATENSTRUKTUR
@@ -1550,84 +1556,8 @@ def export_excel(
 
 
 # =============================================================================
-# 10. DATEIEN AUSWÄHLEN
+# 10. DATEIEN AUSWÄHLEN (dialogs.py)
 # =============================================================================
-
-def choose_pdf(
-    title: str,
-) -> Path:
-    """Öffnet einen Dateidialog zur Auswahl einer PDF-Datei."""
-    from tkinter import Tk, filedialog
-
-    root = Tk()
-    root.withdraw()
-    root.attributes(
-        "-topmost",
-        True,
-    )
-
-    selected = filedialog.askopenfilename(
-        title=title,
-        filetypes=[
-            (
-                "PDF-Dateien",
-                "*.pdf",
-            )
-        ],
-    )
-
-    root.destroy()
-
-    if not selected:
-        raise SystemExit(
-            "Keine PDF-Datei ausgewählt."
-        )
-
-    return Path(selected)
-
-
-def choose_output_folder(
-    initial_folder: Path,
-) -> Path:
-    """Öffnet einen Dialog zur Auswahl des Ausgabeordners."""
-    from tkinter import Tk, filedialog
-
-    root = Tk()
-    root.withdraw()
-    root.attributes(
-        "-topmost",
-        True,
-    )
-
-    selected = filedialog.askdirectory(
-        title="Ausgabeordner auswählen",
-        initialdir=str(initial_folder),
-    )
-
-    root.destroy()
-
-    if not selected:
-        return initial_folder
-
-    return Path(selected)
-
-
-def validate_pdf(
-    path: Path,
-    description: str,
-) -> None:
-    """Prüft, ob die ausgewählte Datei existiert und ein PDF ist."""
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{description} wurde nicht gefunden: "
-            f"{path}"
-        )
-
-    if path.suffix.lower() != ".pdf":
-        raise ValueError(
-            f"{description} ist keine PDF-Datei: "
-            f"{path}"
-        )
 
 
 # =============================================================================
