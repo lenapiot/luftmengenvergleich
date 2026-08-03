@@ -6,7 +6,7 @@ Dabei werden aus allen ausgewählten PDFs automatisch
 - Raumname
 - Zuluft
 - Abluft
-extrahiert, zusammengeführt und miteinander verglichen.
+extrahiert, zusammengeführt und miteinander verglichen. Es können beliebig viele Grundrisspläne und Prinzipschemata hochgeladen werden.
 Das Programm erstellt anschließend
 - eine formatierte Excel-Auswertung,
 - einen markierten Grundriss als PDF,
