@@ -40,10 +40,13 @@ def consolidate_rooms(
        f"abl_{source_label}",
        f"seiten_{source_label}",
        f"anzahl_funde_{source_label}",
+       f"quelldateien_{source_label}",
        f"uneindeutig_{source_label}",
    ]
    if raw_df.empty:
-       return pd.DataFrame(columns=columns)
+       return pd.DataFrame(
+           columns=columns
+       )
    rows: list[dict[str, object]] = []
    for room_id, group in raw_df.groupby(
        "raumnummer",
@@ -66,6 +69,12 @@ def consolidate_rooms(
                and not pd.isna(page)
            }
        )
+       if "quelldatei" in group.columns:
+           source_files = unique_non_null_values(
+               group["quelldatei"]
+           )
+       else:
+           source_files = []
        ambiguous = (
            len(names) > 1
            or len(zul_values) > 1
@@ -94,7 +103,12 @@ def consolidate_rooms(
                f"seiten_{source_label}": ", ".join(
                    map(str, pages)
                ),
-               f"anzahl_funde_{source_label}": len(group),
+               f"anzahl_funde_{source_label}": len(
+                   group
+               ),
+               f"quelldateien_{source_label}": " | ".join(
+                   map(str, source_files)
+               ),
                f"uneindeutig_{source_label}": ambiguous,
            }
        )
@@ -172,8 +186,6 @@ def build_comparison(
    comparison_df["zul_stimmt"] = False
    comparison_df["abl_stimmt"] = False
    comparison_df["raumname_stimmt"] = False
-   # Die drei Vergleiche werden nur ausgeführt,
-   # wenn mindestens ein Raum in beiden Dokumenten vorkommt.
    if both_mask.any():
        comparison_df.loc[
            both_mask,
