@@ -129,7 +129,7 @@ def color_rows_by_status(
 
 def create_legend_sheet(
    workbook,
-   floorplan_pdf: Path,
+   floorplan_pdfs: list[Path],
    schema_pdfs: list[Path],
    comparison_df: pd.DataFrame,
 ) -> None:
@@ -140,16 +140,14 @@ def create_legend_sheet(
        "Legende",
        0,
    )
-   worksheet["A1"] = (
-       "Luftmengen-Vergleich"
-   )
+   worksheet["A1"] = "Luftmengen-Vergleich"
    worksheet["A1"].font = Font(
        bold=True,
        size=16,
    )
    worksheet["A2"] = (
        "Automatischer Vergleich zwischen "
-       "Luftmengen-Grundriss und "
+       "mehreren Luftmengen-Grundrissen und "
        "Lüftungs-Prinzipschemata"
    )
    worksheet["A4"] = "Status"
@@ -157,9 +155,9 @@ def create_legend_sheet(
    worksheet["C4"] = "Anzahl"
    meanings = {
        "OK": (
-           "Raum ist in beiden Dokumenten "
-           "vorhanden; Raumname und "
-           "Luftmengen stimmen überein."
+           "Raum ist in Grundriss und Schema "
+           "vorhanden; Raumname und Luftmengen "
+           "stimmen überein."
        ),
        "Abweichung Luftmenge": (
            "Zuluft und/oder Abluft "
@@ -170,7 +168,7 @@ def create_legend_sheet(
            "die Raumbezeichnung weicht ab."
        ),
        "Nur im Grundriss": (
-           "Der Raum wurde nur im "
+           "Der Raum wurde nur in einem "
            "Grundriss gefunden."
        ),
        "Nur im Schema": (
@@ -220,10 +218,11 @@ def create_legend_sheet(
        )
        row_number += 1
    worksheet["A13"] = (
-       "Verwendeter Grundriss:"
+       "Verwendete Grundrisse:"
    )
-   worksheet["B13"] = (
+   worksheet["B13"] = "\n".join(
        floorplan_pdf.name
+       for floorplan_pdf in floorplan_pdfs
    )
    worksheet["A14"] = (
        "Verwendete Schemata:"
@@ -287,14 +286,17 @@ def create_legend_sheet(
            fill_type="solid",
            fgColor="D9E1F2",
        )
-   worksheet["B14"].alignment = Alignment(
-       vertical="top",
-       wrap_text=True,
-   )
-   worksheet["B16"].alignment = Alignment(
-       vertical="top",
-       wrap_text=True,
-   )
+   for reference in [
+       "B13",
+       "B14",
+       "B16",
+   ]:
+       worksheet[
+           reference
+       ].alignment = Alignment(
+           vertical="top",
+           wrap_text=True,
+       )
    worksheet.column_dimensions[
        "A"
    ].width = 28
@@ -304,6 +306,10 @@ def create_legend_sheet(
    worksheet.column_dimensions[
        "C"
    ].width = 12
+   worksheet.row_dimensions[13].height = max(
+       18,
+       15 * len(floorplan_pdfs),
+   )
    worksheet.row_dimensions[14].height = max(
        18,
        15 * len(schema_pdfs),
@@ -316,7 +322,7 @@ def export_excel(
    schema_raw_df: pd.DataFrame,
    comparison_df: pd.DataFrame,
    marking_df: pd.DataFrame,
-   floorplan_pdf: Path,
+   floorplan_pdfs: list[Path],
    schema_pdfs: list[Path],
 ) -> None:
    """Exportiert und formatiert die Excel-Auswertung."""
@@ -379,7 +385,7 @@ def export_excel(
    )
    create_legend_sheet(
        workbook,
-       floorplan_pdf,
+       floorplan_pdfs,
        schema_pdfs,
        comparison_df,
    )
