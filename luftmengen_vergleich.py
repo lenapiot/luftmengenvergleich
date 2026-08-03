@@ -1,3 +1,5 @@
+from __future__ import annotations 
+
 """
 Automatischer Luftmengenvergleich für ähnlich aufgebaute Grundriss- und
 Lüftungsplan-PDFs.
@@ -30,10 +32,13 @@ Start:
     python luftmengen_vergleich.py
 """
 
-from __future__ import annotations
+import pandas as pd 
+
+
 
 from ui.dialogs import(
     choose_pdf,
+    choose_multiple_pdfs,
     choose_output_folder,
     validate_pdf,
 )
@@ -47,163 +52,137 @@ from core.comparison import build_comparison
 from core.extraction import(
     extract_clean_lines, 
     split_lines_by_page,
-    extract_rooms_from_pages)
-
+    extract_rooms_from_pages,
+    )
 
 def main() -> None:
-    """Führt den vollständigen Luftmengenvergleich aus."""
-    print()
-    print("Luftmengen-Vergleich")
-    print("====================")
-    print()
-
-    floorplan_pdf = choose_pdf(
-        "Grundriss-PDF auswählen"
-    )
-
-    schema_pdf = choose_pdf(
-        "Lüftungsplan / Prinzipschema auswählen"
-    )
-
-    validate_pdf(
-        floorplan_pdf,
-        "Grundriss",
-    )
-
-    validate_pdf(
-        schema_pdf,
-        "Schema",
-    )
-
-    output_dir = choose_output_folder(
-        floorplan_pdf.parent
-    )
-
-    output_excel = (
-        output_dir
-        / (
-            f"{floorplan_pdf.stem}"
-            "_Luftmengenvergleich.xlsx"
-        )
-    )
-
-    output_pdf = (
-        output_dir
-        / (
-            f"{floorplan_pdf.stem}"
-            "_markiert.pdf"
-        )
-    )
-
-    print("1/6 PDFs werden eingelesen ...")
-
-    floorplan_records = (
-        extract_clean_lines(
-            floorplan_pdf
-        )
-    )
-
-    schema_records = (
-        extract_clean_lines(
-            schema_pdf
-        )
-    )
-
-    print("2/6 Räume werden extrahiert ...")
-
-    floorplan_raw_df = (
-        extract_rooms_from_pages(
-            split_lines_by_page(
-                floorplan_records
-            ),
-            "grundriss",
-        )
-    )
-
-    schema_raw_df = (
-        extract_rooms_from_pages(
-            split_lines_by_page(
-                schema_records
-            ),
-            "schema",
-        )
-    )
-
-    print(
-        "   Grundriss:",
-        len(floorplan_raw_df),
-        "gefundene Datensätze",
-    )
-
-    print(
-        "   Schema:",
-        len(schema_raw_df),
-        "gefundene Datensätze",
-    )
-
-    if floorplan_raw_df.empty:
-        raise RuntimeError(
-            "Im Grundriss wurden keine Räume "
-            "mit ZUL/ABL erkannt."
-        )
-
-    if schema_raw_df.empty:
-        raise RuntimeError(
-            "Im Schema wurden keine Räume "
-            "mit Zuluft/Abluft erkannt."
-        )
-
-    print("3/6 Daten werden verglichen ...")
-
-    comparison_df = build_comparison(
-        floorplan_raw_df,
-        schema_raw_df,
-    )
-
-    print("4/6 Grundriss wird markiert ...")
-
-    marking_df = create_marked_pdf(
-        floorplan_pdf,
-        output_pdf,
-        comparison_df,
-    )
-
-    print(
-        "5/6 Excel-Auswertung "
-        "wird erstellt ..."
-    )
-
-    export_excel(
-        output_excel,
-        floorplan_raw_df,
-        schema_raw_df,
-        comparison_df,
-        marking_df,
-        floorplan_pdf,
-        schema_pdf,
-    )
-
-    print("6/6 Fertig.")
-    print()
-
-    print("Excel-Auswertung:")
-    print(output_excel)
-    print()
-
-    print("Markierter Grundriss:")
-    print(output_pdf)
-    print()
-
-    print("Statusübersicht:")
-    print(
-        comparison_df[
-            "status"
-        ]
-        .astype(str)
-        .value_counts()
-        .to_string()
-    )
-
+   """Führt den vollständigen Luftmengenvergleich aus."""
+   print()
+   print("Luftmengen-Vergleich")
+   print("====================")
+   print()
+   floorplan_pdf = choose_pdf(
+       "Grundriss-PDF auswählen"
+   )
+   schema_pdfs = choose_multiple_pdfs(
+       "Lüftungspläne / Prinzipschemata auswählen"
+   )
+   validate_pdf(
+       floorplan_pdf,
+       "Grundriss",
+   )
+   for schema_pdf in schema_pdfs:
+       validate_pdf(
+           schema_pdf,
+           "Schema",
+       )
+   output_dir = choose_output_folder(
+       floorplan_pdf.parent
+   )
+   output_excel = (
+       output_dir
+       / (
+           f"{floorplan_pdf.stem}"
+           "_Luftmengenvergleich.xlsx"
+       )
+   )
+   output_pdf = (
+       output_dir
+       / (
+           f"{floorplan_pdf.stem}"
+           "_markiert.pdf"
+       )
+   )
+   print("1/6 PDFs werden eingelesen ...")
+   floorplan_records = extract_clean_lines(
+       floorplan_pdf
+   )
+   print("2/6 Räume werden extrahiert ...")
+   floorplan_raw_df = extract_rooms_from_pages(
+       split_lines_by_page(
+           floorplan_records
+       ),
+       "grundriss",
+   )
+   schema_dataframes = []
+   for schema_pdf in schema_pdfs:
+       schema_records = extract_clean_lines(
+           schema_pdf
+       )
+       schema_df = extract_rooms_from_pages(
+           split_lines_by_page(
+               schema_records
+           ),
+           "schema",
+       )
+       if not schema_df.empty:
+           schema_df["quelldatei"] = schema_pdf.name
+           schema_dataframes.append(schema_df)
+   if schema_dataframes:
+       schema_raw_df = pd.concat(
+           schema_dataframes,
+           ignore_index=True,
+       )
+   else:
+       schema_raw_df = pd.DataFrame()
+   print(
+       "   Grundriss:",
+       len(floorplan_raw_df),
+       "gefundene Datensätze",
+   )
+   print(
+       "   Schema:",
+       len(schema_raw_df),
+       "gefundene Datensätze",
+   )
+   if floorplan_raw_df.empty:
+       raise RuntimeError(
+           "Im Grundriss wurden keine Räume "
+           "mit ZUL/ABL erkannt."
+       )
+   if schema_raw_df.empty:
+       raise RuntimeError(
+           "Im Schema wurden keine Räume "
+           "mit Zuluft/Abluft erkannt."
+       )
+   print("3/6 Daten werden verglichen ...")
+   comparison_df = build_comparison(
+       floorplan_raw_df,
+       schema_raw_df,
+   )
+   print("4/6 Grundriss wird markiert ...")
+   marking_df = create_marked_pdf(
+       floorplan_pdf,
+       output_pdf,
+       comparison_df,
+   )
+   print(
+       "5/6 Excel-Auswertung wird erstellt ..."
+   )
+   export_excel(
+       output_excel,
+       floorplan_raw_df,
+       schema_raw_df,
+       comparison_df,
+       marking_df,
+       floorplan_pdf,
+       schema_pdfs,   # vorläufig nur für die Legende
+   )
+   print("6/6 Fertig.")
+   print()
+   print("Excel-Auswertung:")
+   print(output_excel)
+   print()
+   print("Markierter Grundriss:")
+   print(output_pdf)
+   print()
+   print("Statusübersicht:")
+   print(
+       comparison_df["status"]
+       .astype(str)
+       .value_counts()
+       .to_string()
+   )
 
 if __name__ == "__main__":
-    main()
+   main()

@@ -172,51 +172,54 @@ def build_comparison(
    comparison_df["zul_stimmt"] = False
    comparison_df["abl_stimmt"] = False
    comparison_df["raumname_stimmt"] = False
-   comparison_df.loc[
-       both_mask,
-       "zul_stimmt",
-   ] = (
+   # Die drei Vergleiche werden nur ausgeführt,
+   # wenn mindestens ein Raum in beiden Dokumenten vorkommt.
+   if both_mask.any():
        comparison_df.loc[
            both_mask,
-           "zul_grundriss",
-       ]
-       ==
-       comparison_df.loc[
-           both_mask,
-           "zul_schema",
-       ]
-   )
-   comparison_df.loc[
-       both_mask,
-       "abl_stimmt",
-   ] = (
-       comparison_df.loc[
-           both_mask,
-           "abl_grundriss",
-       ]
-       ==
-       comparison_df.loc[
-           both_mask,
-           "abl_schema",
-       ]
-   )
-   comparison_df.loc[
-       both_mask,
-       "raumname_stimmt",
-   ] = [
-       normalize_name(left)
-       == normalize_name(right)
-       for left, right in zip(
+           "zul_stimmt",
+       ] = (
            comparison_df.loc[
                both_mask,
-               "raumname_grundriss",
-           ],
+               "zul_grundriss",
+           ]
+           ==
            comparison_df.loc[
                both_mask,
-               "raumname_schema",
-           ],
+               "zul_schema",
+           ]
        )
-   ]
+       comparison_df.loc[
+           both_mask,
+           "abl_stimmt",
+       ] = (
+           comparison_df.loc[
+               both_mask,
+               "abl_grundriss",
+           ]
+           ==
+           comparison_df.loc[
+               both_mask,
+               "abl_schema",
+           ]
+       )
+       comparison_df.loc[
+           both_mask,
+           "raumname_stimmt",
+       ] = [
+           normalize_name(left)
+           == normalize_name(right)
+           for left, right in zip(
+               comparison_df.loc[
+                   both_mask,
+                   "raumname_grundriss",
+               ],
+               comparison_df.loc[
+                   both_mask,
+                   "raumname_schema",
+               ],
+           )
+       ]
    comparison_df["status"] = (
        comparison_df.apply(
            determine_status,

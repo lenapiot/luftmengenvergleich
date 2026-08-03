@@ -42,3 +42,17 @@ def validate_pdf(path: Path, description: str) -> None:
        )
 
 
+def choose_multiple_pdfs(title: str) -> list[Path]:
+   """Öffnet einen Dateidialog zur Auswahl mehrerer PDF-Dateien."""
+   from tkinter import Tk, filedialog
+   root = Tk()
+   root.withdraw()
+   root.attributes("-topmost", True)
+   selected = filedialog.askopenfilenames(
+       title=title,
+       filetypes=[("PDF-Dateien", "*.pdf")],
+   )
+   root.destroy()
+   if not selected:
+       raise SystemExit("Keine PDF-Dateien ausgewählt.")
+   return [Path(path) for path in selected]
