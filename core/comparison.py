@@ -1,7 +1,9 @@
 import re
 import pandas as pd
 
-def normalize_name(value: object) -> str | None:
+def normalize_name(
+   value: object,
+) -> str | None:
    """Normalisiert einen Raumnamen für den Vergleich."""
    if value is None or pd.isna(value):
        return None
@@ -24,23 +26,52 @@ def unique_non_null_values(
            values.append(value)
    return values
 
+def has_multiple_blocks_in_same_file(
+   group: pd.DataFrame,
+) -> bool:
+   """
+   Prüft, ob dieselbe Raumnummer innerhalb derselben PDF mehrfach
+   als eigener Luftmengenblock gefunden wurde.
+   Mehrere identische Funde in unterschiedlichen PDFs sind erlaubt.
+   """
+   if len(group) <= 1:
+       return False
+   if "quelldatei" not in group.columns:
+       return len(group) > 1
+   counts_per_file = (
+       group.groupby(
+           "quelldatei",
+           dropna=False,
+       )
+       .size()
+   )
+   return bool(
+       (counts_per_file > 1).any()
+   )
+
 def consolidate_rooms(
    raw_df: pd.DataFrame,
    source_label: str,
 ) -> pd.DataFrame:
    """
    Erstellt pro Raumnummer eine Vergleichszeile.
-   Mehrere identische Funde sind erlaubt.
-   Mehrere widersprüchliche Werte werden als uneindeutig gekennzeichnet.
+   Uneindeutig ist ein Raum, wenn:
+   - unterschiedliche Raumnamen gefunden wurden,
+   - unterschiedliche Zuluftwerte gefunden wurden,
+   - unterschiedliche Abluftwerte gefunden wurden,
+   - oder innerhalb derselben PDF mehrere Luftmengenblöcke
+     für dieselbe Raumnummer vorhanden sind.
    """
    columns = [
        "raumnummer",
        f"raumname_{source_label}",
+       f"betriebsarten_{source_label}",
        f"zul_{source_label}",
        f"abl_{source_label}",
        f"seiten_{source_label}",
        f"anzahl_funde_{source_label}",
        f"quelldateien_{source_label}",
+       f"mehrfachblock_{source_label}",
        f"uneindeutig_{source_label}",
    ]
    if raw_df.empty:
@@ -61,6 +92,12 @@ def consolidate_rooms(
        abl_values = unique_non_null_values(
            group["abl"]
        )
+       if "betriebsart" in group.columns:
+           operating_modes = unique_non_null_values(
+               group["betriebsart"]
+           )
+       else:
+           operating_modes = []
        pages = sorted(
            {
                int(page)
@@ -75,10 +112,19 @@ def consolidate_rooms(
            )
        else:
            source_files = []
-       ambiguous = (
+       multiple_blocks = (
+           has_multiple_blocks_in_same_file(
+               group
+           )
+       )
+       conflicting_values = (
            len(names) > 1
            or len(zul_values) > 1
            or len(abl_values) > 1
+       )
+       ambiguous = (
+           multiple_blocks
+           or conflicting_values
        )
        rows.append(
            {
@@ -88,6 +134,11 @@ def consolidate_rooms(
                    if len(names) == 1
                    else " | ".join(
                        map(str, names)
+                   )
+               ),
+               f"betriebsarten_{source_label}": (
+                   " | ".join(
+                       map(str, operating_modes)
                    )
                ),
                f"zul_{source_label}": (
@@ -108,6 +159,9 @@ def consolidate_rooms(
                ),
                f"quelldateien_{source_label}": " | ".join(
                    map(str, source_files)
+               ),
+               f"mehrfachblock_{source_label}": (
+                   multiple_blocks
                ),
                f"uneindeutig_{source_label}": ambiguous,
            }
@@ -259,7 +313,12 @@ def build_comparison(
    return (
        comparison_df
        .sort_values(
-           ["status", "raumnummer"]
+           [
+               "status",
+               "raumnummer",
+           ]
        )
-       .reset_index(drop=True)
+       .reset_index(
+           drop=True
+       )
    )
