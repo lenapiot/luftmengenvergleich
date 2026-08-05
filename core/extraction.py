@@ -55,31 +55,27 @@ def normalize_number(
 
 
 def find_room_in_line(
-    line: str,
+   line: str,
+   room_pattern: re.Pattern[str] = ROOM_RE,
 ) -> tuple[str | None, str | None]:
-    """Sucht eine Raumnummer und möglichen Resttext in einer Zeile."""
-    match = ROOM_RE.search(
-        line or ""
-    )
-
-    if not match:
-        return None, None
-
-    room_id = match.group(0)
-
-    rest = (
-        line[:match.start()]
-        + " "
-        + line[match.end():]
-    ).strip()
-
-    rest = re.sub(
-        r"\s+",
-        " ",
-        rest,
-    )
-
-    return room_id, rest or None
+   """Sucht eine Raumnummer und möglichen Resttext in einer Zeile."""
+   match = room_pattern.search(
+       line or ""
+   )
+   if not match:
+       return None, None
+   room_id = match.group(0)
+   rest = (
+       line[:match.start()]
+       + " "
+       + line[match.end():]
+   ).strip()
+   rest = re.sub(
+       r"\s+",
+       " ",
+       rest,
+   )
+   return room_id, rest or None
 
 
 def is_airflow_line(
@@ -241,57 +237,52 @@ def find_matching_airflow_pair(
 
 
 def choose_room_candidate(
-    lines: list[str],
-    zul_index: int,
-    abl_index: int,
-    preferred_offsets: list[int],
+   lines: list[str],
+   zul_index: int,
+   abl_index: int,
+   preferred_offsets: list[int],
+   room_pattern: re.Pattern[str] = ROOM_RE,
 ) -> tuple[
-    str | None,
-    str | None,
-    int | None,
+   str | None,
+   str | None,
+   int | None,
 ]:
-    """Sucht nahe einer Luftmengenangabe nach einer Raumnummer."""
-    candidate_indices = [
-        zul_index + offset
-        for offset in preferred_offsets
-    ]
+   """Sucht nahe einer Luftmengenangabe nach einer Raumnummer."""
+   candidate_indices = [
+       zul_index + offset
+       for offset in preferred_offsets
+   ]
+   for distance in range(
+       1,
+       ROOM_SEARCH_RADIUS + 1,
+   ):
+       candidate_indices.extend(
+           [
+               zul_index - distance,
+               abl_index + distance,
+           ]
+       )
+   already_tested: set[int] = set()
+   for candidate_index in candidate_indices:
+       if candidate_index in already_tested:
+           continue
+       already_tested.add(
+           candidate_index
+       )
+       if not 0 <= candidate_index < len(lines):
+           continue
+       room_id, rest = find_room_in_line(
+           lines[candidate_index],
+           room_pattern,
+       )
+       if room_id:
+           return (
+               room_id,
+               rest,
+               candidate_index,
+           )
+   return None, None, None
 
-    for distance in range(
-        1,
-        ROOM_SEARCH_RADIUS + 1,
-    ):
-        candidate_indices.extend(
-            [
-                zul_index - distance,
-                abl_index + distance,
-            ]
-        )
-
-    already_tested: set[int] = set()
-
-    for candidate_index in candidate_indices:
-        if candidate_index in already_tested:
-            continue
-
-        already_tested.add(
-            candidate_index
-        )
-
-        if not 0 <= candidate_index < len(lines):
-            continue
-
-        room_id, rest = find_room_in_line(
-            lines[candidate_index]
-        )
-
-        if room_id:
-            return (
-                room_id,
-                rest,
-                candidate_index,
-            )
-
-    return None, None, None
 
 
 def find_operating_mode_near_block(
@@ -358,222 +349,196 @@ def find_operating_mode_near_block(
 
 
 def infer_room_name(
-    lines: list[str],
-    room_index: int,
-    zul_index: int,
-    rest: str | None,
+   lines: list[str],
+   room_index: int,
+   zul_index: int,
+   rest: str | None,
+   room_pattern: re.Pattern[str] = ROOM_RE,
 ) -> str | None:
-    """Sucht den wahrscheinlichsten Raumnamen."""
-    cleaned_rest = remove_operating_mode_from_text(
-        rest
-    )
+   """Sucht den wahrscheinlichsten Raumnamen."""
+   cleaned_rest = remove_operating_mode_from_text(
+       rest
+   )
+   if cleaned_rest:
+       return cleaned_rest
+   candidate_indices = [
+       room_index - 1,
+       zul_index - 1,
+       room_index + 1,
+       zul_index - 2,
+   ]
+   for index in candidate_indices:
+       if not 0 <= index < len(lines):
+           continue
+       candidate = lines[index].strip()
+       if not candidate:
+           continue
+       if is_airflow_line(candidate):
+           continue
+       if detect_operating_mode(candidate):
+           continue
+       candidate_room_id, _ = find_room_in_line(
+           candidate,
+           room_pattern,
+       )
+       if candidate_room_id:
+           continue
+       if re.fullmatch(
+           r"[\d\s'’`.,:/+\-]+",
+           candidate,
+       ):
+           continue
+       candidate = remove_operating_mode_from_text(
+           candidate
+       )
+       if candidate:
+           return candidate
+   return None
 
-    if cleaned_rest:
-        return cleaned_rest
 
-    candidate_indices = [
-        room_index - 1,
-        zul_index - 1,
-        room_index + 1,
-        zul_index - 2,
-    ]
 
-    for index in candidate_indices:
-        if not 0 <= index < len(lines):
-            continue
-
-        candidate = lines[index].strip()
-
-        if not candidate:
-            continue
-
-        if is_airflow_line(candidate):
-            continue
-
-        if detect_operating_mode(candidate):
-            continue
-
-        candidate_room_id, _ = find_room_in_line(
-            candidate
-        )
-
-        if candidate_room_id:
-            continue
-
-        if re.fullmatch(
-            r"[\d\s'’`.,:/+\-]+",
-            candidate,
-        ):
-            continue
-
-        candidate = remove_operating_mode_from_text(
-            candidate
-        )
-
-        if candidate:
-            return candidate
-
-    return None
 
 
 def extract_rooms_from_pages(
-    page_lines: dict[int, list[str]],
-    source_type: str,
+   page_lines: dict[int, list[str]],
+   source_type: str,
+   room_pattern: re.Pattern[str] = ROOM_RE,
 ) -> pd.DataFrame:
-    """
-    Extrahiert Raumnummer, Raumname, Zuluft, Abluft und Betriebsart.
-
-    Jeder vollständige ZUL-/ABL-Block wird als eigener Datensatz gespeichert.
-    Dadurch können mehrere Blöcke derselben Raumnummer später als uneindeutig
-    erkannt werden.
-    """
-    if source_type == "grundriss":
-        zul_re = re.compile(
-            r"^ZUL\s*:\s*([0-9'’` ]+|\?)\s*m",
-            re.IGNORECASE,
-        )
-
-        abl_re = re.compile(
-            r"^ABL\s*:\s*([0-9'’` ]+|\?)\s*m",
-            re.IGNORECASE,
-        )
-
-        preferred_offsets = [
-            -1,
-            2,
-            -2,
-            3,
-        ]
-
-    elif source_type == "schema":
-        zul_re = re.compile(
-            r"^Zuluft\s*:?\s*([0-9'’` ]+|\?)\s*m",
-            re.IGNORECASE,
-        )
-
-        abl_re = re.compile(
-            r"^Abluft\s*:?\s*([0-9'’` ]+|\?)\s*m",
-            re.IGNORECASE,
-        )
-
-        preferred_offsets = [
-            -1,
-            -2,
-            2,
-            3,
-        ]
-
-    else:
-        raise ValueError(
-            "source_type muss 'grundriss' oder 'schema' sein."
-        )
-
-    rooms: list[dict[str, object]] = []
-
-    for page_number, lines in page_lines.items():
-        block_index = 0
-
-        for zul_index in range(
-            len(lines)
-        ):
-            airflow_pair = find_matching_airflow_pair(
-                lines,
-                zul_index,
-                zul_re,
-                abl_re,
-            )
-
-            if airflow_pair is None:
-                continue
-
-            (
-                zul_match,
-                abl_match,
-                abl_index,
-            ) = airflow_pair
-
-            (
-                room_id,
-                rest,
-                room_index,
-            ) = choose_room_candidate(
-                lines,
-                zul_index,
-                abl_index,
-                preferred_offsets,
-            )
-
-            if (
-                room_id is None
-                or room_index is None
-            ):
-                continue
-
-            block_index += 1
-
-            room_name = infer_room_name(
-                lines,
-                room_index,
-                zul_index,
-                rest,
-            )
-
-            operating_mode = (
-                find_operating_mode_near_block(
-                    lines,
-                    room_index,
-                    zul_index,
-                    abl_index,
-                )
-            )
-
-            rooms.append(
-                {
-                    "raumnummer": room_id,
-                    "raumname": room_name,
-                    "betriebsart": operating_mode,
-                    "zul": normalize_number(
-                        zul_match.group(1)
-                    ),
-                    "abl": normalize_number(
-                        abl_match.group(1)
-                    ),
-                    "seite": page_number,
-                    "block_index": block_index,
-                    "quelle": source_type,
-                }
-            )
-
-    columns = [
-        "raumnummer",
-        "raumname",
-        "betriebsart",
-        "zul",
-        "abl",
-        "seite",
-        "block_index",
-        "quelle",
-    ]
-
-    if not rooms:
-        return pd.DataFrame(
-            columns=columns
-        )
-
-    return (
-        pd.DataFrame(
-            rooms,
-            columns=columns,
-        )
-        .drop_duplicates()
-        .sort_values(
-            [
-                "raumnummer",
-                "seite",
-                "block_index",
-            ]
-        )
-        .reset_index(
-            drop=True
-        )
-    )
+   """
+   Extrahiert Raumnummer, Raumname, Zuluft, Abluft und Betriebsart.
+   Jeder vollständige ZUL-/ABL-Block wird als eigener Datensatz gespeichert.
+   Dadurch können mehrere Blöcke derselben Raumnummer später als uneindeutig
+   erkannt werden.
+   """
+   if source_type == "grundriss":
+       zul_re = re.compile(
+           r"^ZUL\s*:\s*([0-9'’` ]+|\?)\s*m",
+           re.IGNORECASE,
+       )
+       abl_re = re.compile(
+           r"^ABL\s*:\s*([0-9'’` ]+|\?)\s*m",
+           re.IGNORECASE,
+       )
+       preferred_offsets = [
+           -1,
+           2,
+           -2,
+           3,
+       ]
+   elif source_type == "schema":
+       zul_re = re.compile(
+           r"^Zuluft\s*:?\s*([0-9'’` ]+|\?)\s*m",
+           re.IGNORECASE,
+       )
+       abl_re = re.compile(
+           r"^Abluft\s*:?\s*([0-9'’` ]+|\?)\s*m",
+           re.IGNORECASE,
+       )
+       preferred_offsets = [
+           -1,
+           -2,
+           2,
+           3,
+       ]
+   else:
+       raise ValueError(
+           "source_type muss 'grundriss' oder 'schema' sein."
+       )
+   rooms: list[dict[str, object]] = []
+   for page_number, lines in page_lines.items():
+       block_index = 0
+       for zul_index in range(
+           len(lines)
+       ):
+           airflow_pair = find_matching_airflow_pair(
+               lines,
+               zul_index,
+               zul_re,
+               abl_re,
+           )
+           if airflow_pair is None:
+               continue
+           (
+               zul_match,
+               abl_match,
+               abl_index,
+           ) = airflow_pair
+           (
+               room_id,
+               rest,
+               room_index,
+           ) = choose_room_candidate(
+               lines,
+               zul_index,
+               abl_index,
+               preferred_offsets,
+               room_pattern,
+           )
+           if (
+               room_id is None
+               or room_index is None
+           ):
+               continue
+           block_index += 1
+           room_name = infer_room_name(
+               lines,
+               room_index,
+               zul_index,
+               rest,
+               room_pattern,
+           )
+           operating_mode = (
+               find_operating_mode_near_block(
+                   lines,
+                   room_index,
+                   zul_index,
+                   abl_index,
+               )
+           )
+           rooms.append(
+               {
+                   "raumnummer": room_id,
+                   "raumname": room_name,
+                   "betriebsart": operating_mode,
+                   "zul": normalize_number(
+                       zul_match.group(1)
+                   ),
+                   "abl": normalize_number(
+                       abl_match.group(1)
+                   ),
+                   "seite": page_number,
+                   "block_index": block_index,
+                   "quelle": source_type,
+               }
+           )
+   columns = [
+       "raumnummer",
+       "raumname",
+       "betriebsart",
+       "zul",
+       "abl",
+       "seite",
+       "block_index",
+       "quelle",
+   ]
+   if not rooms:
+       return pd.DataFrame(
+           columns=columns
+       )
+   return (
+       pd.DataFrame(
+           rooms,
+           columns=columns,
+       )
+       .drop_duplicates()
+       .sort_values(
+           [
+               "raumnummer",
+               "seite",
+               "block_index",
+           ]
+       )
+       .reset_index(
+           drop=True
+       )
+   )

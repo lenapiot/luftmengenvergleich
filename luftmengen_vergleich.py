@@ -10,6 +10,10 @@ Start:
 from collections.abc import Callable, Sequence
 from pathlib import Path
 import pandas as pd
+from config.settings import (
+   DEFAULT_ROOM_PATTERN_KEY,
+   get_room_pattern,
+)
 from core.comparison import build_comparison
 from core.extraction import (
    extract_clean_lines,
@@ -27,12 +31,16 @@ def run_comparison(
    schema_pdfs: Sequence[Path],
    output_dir: Path,
    status_callback: StatusCallback | None = None,
+   room_pattern_key: str = DEFAULT_ROOM_PATTERN_KEY,
+   custom_room_pattern: str | None = None,
 ) -> dict[str, object]:
    """
    Führt den vollständigen Luftmengenvergleich aus.
-   Diese Funktion enthält die eigentliche Verarbeitung und kann sowohl von
-   einer grafischen Benutzeroberfläche als auch von anderen Programmteilen
-   aufgerufen werden.
+   room_pattern_key:
+       Schlüssel eines vordefinierten Raumnummernformats.
+   custom_room_pattern:
+       Optionales benutzerdefiniertes Regex-Muster. Wenn dieses angegeben
+       wird, hat es Vorrang vor room_pattern_key.
    """
    def report(message: str) -> None:
        print(message)
@@ -55,6 +63,10 @@ def run_comparison(
        raise ValueError(
            "Es wurden keine Prinzipschemata ausgewählt."
        )
+   room_pattern = get_room_pattern(
+       preset_key=room_pattern_key,
+       custom_pattern=custom_room_pattern,
+   )
    for floorplan_pdf in floorplan_pdfs:
        validate_pdf(
            floorplan_pdf,
@@ -95,6 +107,7 @@ def run_comparison(
                floorplan_records
            ),
            "grundriss",
+           room_pattern,
        )
        if not floorplan_df.empty:
            floorplan_df["quelldatei"] = (
@@ -124,6 +137,7 @@ def run_comparison(
                schema_records
            ),
            "schema",
+           room_pattern,
        )
        if not schema_df.empty:
            schema_df["quelldatei"] = (
@@ -242,6 +256,7 @@ def run_comparison(
        "output_pdfs": output_pdfs,
        "comparison_df": comparison_df,
        "marking_df": combined_marking_df,
+       "room_pattern": room_pattern.pattern,
    }
 
 def main() -> None:
@@ -251,3 +266,5 @@ def main() -> None:
 
 if __name__ == "__main__":
    main()
+
+
