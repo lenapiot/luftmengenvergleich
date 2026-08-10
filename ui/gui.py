@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
@@ -14,12 +14,13 @@ from config.settings import (
     DEFAULT_ROOM_PATTERN_KEY,
     ROOM_PATTERN_PRESETS,
 )
+from hk.nummernkontrolle import run_hk_number_check 
 from luftmengen_vergleich import run_comparison
 
 
 CUSTOM_PATTERN_LABEL = "Benutzerdefiniertes Muster"
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 BACKGROUND_COLOR = "#F3F6F8"
 CARD_COLOR = "#FFFFFF"
@@ -45,19 +46,26 @@ class LuftmengenGUI:
         self.root = tk.Tk()
 
         self.root.title(
-            f"Luftmengenvergleich – Version {APP_VERSION}"
+            f"Planvergleich – Version {APP_VERSION}"
         )
 
-        self.root.geometry("940x830")
-        self.root.minsize(900, 780)
+        self.root.geometry("980x860")
+        self.root.minsize(920, 800)
 
         self.root.configure(
             bg=BACKGROUND_COLOR
         )
 
+        self.active_module = tk.StringVar(
+            value="lueftung"
+        )
+
         self.floorplan_pdfs: list[Path] = []
         self.schema_pdfs: list[Path] = []
         self.output_dir: Path | None = None
+
+        self.hk_pairs: list[dict[str, str]] = []
+        self.hk_output_dir: Path | None = None
 
         self.pattern_labels_to_keys = {
             settings["label"]: key
@@ -77,16 +85,15 @@ class LuftmengenGUI:
 
         self.logo_image: ImageTk.PhotoImage | None = None
 
-        self.interactive_widgets: list[
-            tk.Widget
-        ] = []
+        self.lueftung_widgets: list[tk.Widget] = []
+        self.hk_widgets: list[tk.Widget] = []
 
         self.configure_styles()
         self.create_widgets()
+        self.show_lueftung_module()
         self.update_pattern_description()
 
     def configure_styles(self) -> None:
-        """Konfiguriert die Darstellung der ttk-Elemente."""
         style = ttk.Style(
             self.root
         )
@@ -150,41 +157,40 @@ class LuftmengenGUI:
         )
 
     def create_widgets(self) -> None:
-        """Erstellt das vollständige Fenster."""
         self.create_header()
 
-        content = tk.Frame(
+        self.content = tk.Frame(
             self.root,
             bg=BACKGROUND_COLOR,
         )
 
-        content.pack(
+        self.content.pack(
             fill="both",
             expand=True,
             padx=30,
             pady=(18, 10),
         )
 
-        self.create_files_card(
-            content
+        self.create_module_selector(
+            self.content
         )
 
-        self.create_pattern_card(
-            content
+        self.module_area = tk.Frame(
+            self.content,
+            bg=BACKGROUND_COLOR,
         )
 
-        self.create_output_card(
-            content
+        self.module_area.pack(
+            fill="both",
+            expand=True,
         )
 
-        self.create_action_area(
-            content
-        )
+        self.create_lueftung_area()
+        self.create_hk_area()
 
         self.create_footer()
 
     def create_header(self) -> None:
-        """Erstellt den Kopfbereich mit Logo und Titel."""
         header = tk.Frame(
             self.root,
             bg=CARD_COLOR,
@@ -234,12 +240,8 @@ class LuftmengenGUI:
 
         tk.Label(
             title_frame,
-            text="Luftmengenvergleich",
-            font=(
-                "Segoe UI",
-                23,
-                "bold",
-            ),
+            text="Planvergleich",
+            font=("Segoe UI", 23, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="e",
@@ -250,13 +252,10 @@ class LuftmengenGUI:
         tk.Label(
             title_frame,
             text=(
-                "Automatischer Vergleich von "
-                "Grundrissen und Prinzipschemata"
+                "Lüftung · Heizung/Kälte · "
+                "automatische Schema- und Listenprüfung"
             ),
-            font=(
-                "Segoe UI",
-                10,
-            ),
+            font=("Segoe UI", 10),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="e",
@@ -269,7 +268,6 @@ class LuftmengenGUI:
         self,
         parent: tk.Widget,
     ) -> None:
-        """Lädt das eicher+pauli-Logo als JPG."""
         if not LOGO_PATH.exists():
             self.create_text_logo(
                 parent
@@ -292,10 +290,8 @@ class LuftmengenGUI:
                     Image.Resampling.LANCZOS,
                 )
 
-                self.logo_image = (
-                    ImageTk.PhotoImage(
-                        logo
-                    )
+                self.logo_image = ImageTk.PhotoImage(
+                    logo
                 )
 
             tk.Label(
@@ -313,15 +309,10 @@ class LuftmengenGUI:
         self,
         parent: tk.Widget,
     ) -> None:
-        """Zeigt eine Ersatzdarstellung, falls das Logo fehlt."""
         tk.Label(
             parent,
             text="eicher+pauli",
-            font=(
-                "Segoe UI",
-                22,
-                "bold",
-            ),
+            font=("Segoe UI", 22, "bold"),
             fg=PRIMARY_COLOR,
             bg=CARD_COLOR,
         ).pack(
@@ -331,15 +322,64 @@ class LuftmengenGUI:
         tk.Label(
             parent,
             text="Energie und Planung",
-            font=(
-                "Segoe UI",
-                10,
-                "bold",
-            ),
+            font=("Segoe UI", 10, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
         ).pack(
             anchor="w"
+        )
+
+    def create_module_selector(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        selector = tk.Frame(
+            parent,
+            bg=BACKGROUND_COLOR,
+        )
+
+        selector.pack(
+            fill="x",
+            pady=(0, 12),
+        )
+
+        self.lueftung_button = tk.Button(
+            selector,
+            text="Lüftung – Luftmengenvergleich",
+            font=("Segoe UI", 10, "bold"),
+            fg="white",
+            bg=PRIMARY_COLOR,
+            activeforeground="white",
+            activebackground=PRIMARY_HOVER_COLOR,
+            relief="flat",
+            cursor="hand2",
+            command=self.show_lueftung_module,
+            padx=18,
+            pady=10,
+        )
+
+        self.lueftung_button.pack(
+            side="left",
+            padx=(0, 10),
+        )
+
+        self.hk_button = tk.Button(
+            selector,
+            text="Heizung/Kälte – Nummernkontrolle",
+            font=("Segoe UI", 10, "bold"),
+            fg=TEXT_COLOR,
+            bg="#E8EEF1",
+            activeforeground=TEXT_COLOR,
+            activebackground="#D9E3E8",
+            relief="flat",
+            cursor="hand2",
+            command=self.show_hk_module,
+            padx=18,
+            pady=10,
+        )
+
+        self.hk_button.pack(
+            side="left",
         )
 
     def create_card(
@@ -347,7 +387,6 @@ class LuftmengenGUI:
         parent: tk.Widget,
         title: str,
     ) -> tk.Frame:
-        """Erstellt einen einheitlichen weissen Inhaltsbereich."""
         outer = tk.Frame(
             parent,
             bg=CARD_COLOR,
@@ -363,11 +402,7 @@ class LuftmengenGUI:
         tk.Label(
             outer,
             text=title,
-            font=(
-                "Segoe UI",
-                11,
-                "bold",
-            ),
+            font=("Segoe UI", 11, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="w",
@@ -401,11 +436,98 @@ class LuftmengenGUI:
 
         return inner
 
-    def create_files_card(
+    def create_lueftung_area(self) -> None:
+        self.lueftung_frame = tk.Frame(
+            self.module_area,
+            bg=BACKGROUND_COLOR,
+        )
+
+        self.create_lueftung_files_card(
+            self.lueftung_frame
+        )
+
+        self.create_lueftung_pattern_card(
+            self.lueftung_frame
+        )
+
+        self.create_lueftung_output_card(
+            self.lueftung_frame
+        )
+
+        self.create_lueftung_action_area(
+            self.lueftung_frame
+        )
+
+    def create_hk_area(self) -> None:
+        self.hk_frame = tk.Frame(
+            self.module_area,
+            bg=BACKGROUND_COLOR,
+        )
+
+        self.create_hk_info_card(
+            self.hk_frame
+        )
+
+        self.create_hk_pairs_card(
+            self.hk_frame
+        )
+
+        self.create_hk_output_card(
+            self.hk_frame
+        )
+
+        self.create_hk_action_area(
+            self.hk_frame
+        )
+
+    def show_lueftung_module(self) -> None:
+        self.active_module.set(
+            "lueftung"
+        )
+
+        self.hk_frame.pack_forget()
+
+        self.lueftung_frame.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.lueftung_button.config(
+            fg="white",
+            bg=PRIMARY_COLOR,
+        )
+
+        self.hk_button.config(
+            fg=TEXT_COLOR,
+            bg="#E8EEF1",
+        )
+
+    def show_hk_module(self) -> None:
+        self.active_module.set(
+            "hk"
+        )
+
+        self.lueftung_frame.pack_forget()
+
+        self.hk_frame.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.hk_button.config(
+            fg="white",
+            bg=PRIMARY_COLOR,
+        )
+
+        self.lueftung_button.config(
+            fg=TEXT_COLOR,
+            bg="#E8EEF1",
+        )
+
+    def create_lueftung_files_card(
         self,
         parent: tk.Widget,
     ) -> None:
-        """Erstellt den Bereich für die PDF-Auswahl."""
         frame = self.create_card(
             parent,
             "1. Dateien auswählen",
@@ -422,15 +544,13 @@ class LuftmengenGUI:
             title="Grundrisse",
             add_command=self.choose_floorplans,
             clear_command=self.clear_floorplans,
+            widget_list=self.lueftung_widgets,
         )
 
         self.floorplan_label = tk.Label(
             frame,
             text="Keine Grundrisse ausgewählt",
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="w",
@@ -451,15 +571,13 @@ class LuftmengenGUI:
             title="Prinzipschemata",
             add_command=self.choose_schemas,
             clear_command=self.clear_schemas,
+            widget_list=self.lueftung_widgets,
         )
 
         self.schema_label = tk.Label(
             frame,
             text="Keine Prinzipschemata ausgewählt",
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="w",
@@ -480,16 +598,12 @@ class LuftmengenGUI:
         title: str,
         add_command,
         clear_command,
+        widget_list: list[tk.Widget],
     ) -> None:
-        """Erstellt eine Zeile für eine Dateikategorie."""
         tk.Label(
             frame,
             text=f"{title}:",
-            font=(
-                "Segoe UI",
-                10,
-                "bold",
-            ),
+            font=("Segoe UI", 10, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="w",
@@ -528,18 +642,17 @@ class LuftmengenGUI:
             pady=5,
         )
 
-        self.interactive_widgets.extend(
+        widget_list.extend(
             [
                 add_button,
                 clear_button,
             ]
         )
 
-    def create_pattern_card(
+    def create_lueftung_pattern_card(
         self,
         parent: tk.Widget,
     ) -> None:
-        """Erstellt die Auswahl des Raumnummernformats."""
         frame = self.create_card(
             parent,
             "2. Raumnummernformat",
@@ -553,11 +666,7 @@ class LuftmengenGUI:
         tk.Label(
             frame,
             text="Format:",
-            font=(
-                "Segoe UI",
-                10,
-                "bold",
-            ),
+            font=("Segoe UI", 10, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
         ).grid(
@@ -599,17 +708,14 @@ class LuftmengenGUI:
             self.on_pattern_changed,
         )
 
-        self.interactive_widgets.append(
+        self.lueftung_widgets.append(
             self.pattern_combobox
         )
 
         self.pattern_description_label = tk.Label(
             frame,
             text="",
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
             justify="left",
@@ -628,11 +734,7 @@ class LuftmengenGUI:
         self.custom_pattern_label = tk.Label(
             frame,
             text="Eigenes Muster:",
-            font=(
-                "Segoe UI",
-                10,
-                "bold",
-            ),
+            font=("Segoe UI", 10, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
         )
@@ -649,10 +751,7 @@ class LuftmengenGUI:
             frame,
             textvariable=self.custom_pattern_var,
             width=48,
-            font=(
-                "Consolas",
-                10,
-            ),
+            font=("Consolas", 10),
             relief="solid",
             borderwidth=1,
             disabledbackground="#EDF1F3",
@@ -671,7 +770,7 @@ class LuftmengenGUI:
             state="disabled"
         )
 
-        self.interactive_widgets.append(
+        self.lueftung_widgets.append(
             self.custom_pattern_entry
         )
 
@@ -682,10 +781,7 @@ class LuftmengenGUI:
                 "Mehrere Luftmengenblöcke derselben Raumnummer "
                 "werden als «Mehrfach / uneindeutig» markiert."
             ),
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
             justify="left",
@@ -701,11 +797,10 @@ class LuftmengenGUI:
             pady=(6, 0),
         )
 
-    def create_output_card(
+    def create_lueftung_output_card(
         self,
         parent: tk.Widget,
     ) -> None:
-        """Erstellt den Bereich für den Ausgabeordner."""
         frame = self.create_card(
             parent,
             "3. Ausgabe",
@@ -730,17 +825,14 @@ class LuftmengenGUI:
             pady=4,
         )
 
-        self.interactive_widgets.append(
+        self.lueftung_widgets.append(
             output_button
         )
 
         self.output_label = tk.Label(
             frame,
             text="Kein Ausgabeordner ausgewählt",
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
             anchor="w",
@@ -754,11 +846,10 @@ class LuftmengenGUI:
             sticky="w",
         )
 
-    def create_action_area(
+    def create_lueftung_action_area(
         self,
         parent: tk.Widget,
     ) -> None:
-        """Erstellt Startknopf, Status und Fortschrittsbalken."""
         action_frame = tk.Frame(
             parent,
             bg=BACKGROUND_COLOR,
@@ -771,19 +862,15 @@ class LuftmengenGUI:
 
         self.start_button = tk.Button(
             action_frame,
-            text="Vergleich starten",
-            font=(
-                "Segoe UI",
-                12,
-                "bold",
-            ),
+            text="Luftmengenvergleich starten",
+            font=("Segoe UI", 12, "bold"),
             fg="white",
             bg=PRIMARY_COLOR,
             activeforeground="white",
             activebackground=PRIMARY_HOVER_COLOR,
             relief="flat",
             cursor="hand2",
-            command=self.start,
+            command=self.start_lueftung,
             padx=35,
             pady=12,
         )
@@ -807,10 +894,7 @@ class LuftmengenGUI:
         self.status = tk.Label(
             action_frame,
             text="Bereit",
-            font=(
-                "Segoe UI",
-                10,
-            ),
+            font=("Segoe UI", 10),
             fg=MUTED_TEXT_COLOR,
             bg=BACKGROUND_COLOR,
             wraplength=760,
@@ -818,8 +902,200 @@ class LuftmengenGUI:
 
         self.status.pack()
 
+    def create_hk_info_card(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        frame = self.create_card(
+            parent,
+            "Heizung/Kälte – Nummernkontrolle Schema/BML",
+        )
+
+        tk.Label(
+            frame,
+            text=(
+                "Dieses Modul vergleicht die blauen Positionsnummern "
+                "aus einem Prinzipschema mit der Spalte «Pos. Nr.» "
+                "aus der dazugehörigen Betriebsmittelliste."
+            ),
+            font=("Segoe UI", 10),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            justify="left",
+            wraplength=820,
+            anchor="w",
+        ).pack(
+            fill="x"
+        )
+
+    def create_hk_pairs_card(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        frame = self.create_card(
+            parent,
+            "1. Schema/BML-Paare auswählen",
+        )
+
+        button_frame = tk.Frame(
+            frame,
+            bg=CARD_COLOR,
+        )
+
+        button_frame.pack(
+            fill="x",
+        )
+
+        add_button = self.create_secondary_button(
+            button_frame,
+            "Paar hinzufügen",
+            self.add_hk_pair,
+        )
+
+        add_button.pack(
+            side="left",
+            padx=(0, 8),
+        )
+
+        clear_button = self.create_light_button(
+            button_frame,
+            "Paarliste leeren",
+            self.clear_hk_pairs,
+        )
+
+        clear_button.pack(
+            side="left",
+        )
+
+        self.hk_widgets.extend(
+            [
+                add_button,
+                clear_button,
+            ]
+        )
+
+        self.hk_pairs_label = tk.Label(
+            frame,
+            text="Keine Paare ausgewählt",
+            font=("Segoe UI", 9),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            justify="left",
+            anchor="w",
+            wraplength=820,
+        )
+
+        self.hk_pairs_label.pack(
+            fill="x",
+            pady=(12, 0),
+        )
+
+    def create_hk_output_card(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        frame = self.create_card(
+            parent,
+            "2. Ausgabe",
+        )
+
+        frame.columnconfigure(
+            1,
+            weight=1,
+        )
+
+        output_button = self.create_secondary_button(
+            frame,
+            "Ausgabeordner auswählen",
+            self.choose_hk_output,
+        )
+
+        output_button.grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 15),
+            pady=4,
+        )
+
+        self.hk_widgets.append(
+            output_button
+        )
+
+        self.hk_output_label = tk.Label(
+            frame,
+            text="Kein Ausgabeordner ausgewählt",
+            font=("Segoe UI", 9),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            anchor="w",
+            justify="left",
+            wraplength=600,
+        )
+
+        self.hk_output_label.grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+
+    def create_hk_action_area(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        action_frame = tk.Frame(
+            parent,
+            bg=BACKGROUND_COLOR,
+        )
+
+        action_frame.pack(
+            fill="x",
+            pady=(15, 5),
+        )
+
+        self.hk_start_button = tk.Button(
+            action_frame,
+            text="HK-Nummernkontrolle starten",
+            font=("Segoe UI", 12, "bold"),
+            fg="white",
+            bg=PRIMARY_COLOR,
+            activeforeground="white",
+            activebackground=PRIMARY_HOVER_COLOR,
+            relief="flat",
+            cursor="hand2",
+            command=self.start_hk,
+            padx=35,
+            pady=12,
+        )
+
+        self.hk_start_button.pack()
+
+        self.hk_progress = ttk.Progressbar(
+            action_frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=1,
+            value=0,
+            length=600,
+            style="Comparison.Horizontal.TProgressbar",
+        )
+
+        self.hk_progress.pack(
+            pady=(18, 8)
+        )
+
+        self.hk_status = tk.Label(
+            action_frame,
+            text="Bereit",
+            font=("Segoe UI", 10),
+            fg=MUTED_TEXT_COLOR,
+            bg=BACKGROUND_COLOR,
+            wraplength=760,
+        )
+
+        self.hk_status.pack()
+
     def create_footer(self) -> None:
-        """Erstellt Fusszeile mit Benutzer, Datum und Version."""
         username = getpass.getuser()
 
         current_date = datetime.now().strftime(
@@ -842,10 +1118,7 @@ class LuftmengenGUI:
                 f"Benutzer: {username}    |    "
                 f"Datum: {current_date}"
             ),
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg="#E7EDF0",
         ).pack(
@@ -858,12 +1131,9 @@ class LuftmengenGUI:
             footer,
             text=(
                 f"eicher+pauli · "
-                f"Luftmengenvergleich v{APP_VERSION}"
+                f"Planvergleich v{APP_VERSION}"
             ),
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg="#E7EDF0",
         ).pack(
@@ -878,15 +1148,10 @@ class LuftmengenGUI:
         text: str,
         command,
     ) -> tk.Button:
-        """Erstellt einen blauen Sekundärbutton."""
         return tk.Button(
             parent,
             text=text,
-            font=(
-                "Segoe UI",
-                9,
-                "bold",
-            ),
+            font=("Segoe UI", 9, "bold"),
             fg="white",
             bg=PRIMARY_COLOR,
             activeforeground="white",
@@ -904,14 +1169,10 @@ class LuftmengenGUI:
         text: str,
         command,
     ) -> tk.Button:
-        """Erstellt einen zurückhaltenden hellen Button."""
         return tk.Button(
             parent,
             text=text,
-            font=(
-                "Segoe UI",
-                9,
-            ),
+            font=("Segoe UI", 9),
             fg=TEXT_COLOR,
             bg="#E8EEF1",
             activeforeground=TEXT_COLOR,
@@ -983,18 +1244,14 @@ class LuftmengenGUI:
         )
 
         if count == 0:
-            text = (
-                "Keine Grundrisse ausgewählt"
-            )
+            text = "Keine Grundrisse ausgewählt"
         elif count == 1:
             text = (
                 f"1 Grundriss ausgewählt: "
                 f"{self.floorplan_pdfs[0].name}"
             )
         else:
-            text = (
-                f"{count} Grundrisse ausgewählt"
-            )
+            text = f"{count} Grundrisse ausgewählt"
 
         self.floorplan_label.config(
             text=text
@@ -1006,18 +1263,14 @@ class LuftmengenGUI:
         )
 
         if count == 0:
-            text = (
-                "Keine Prinzipschemata ausgewählt"
-            )
+            text = "Keine Prinzipschemata ausgewählt"
         elif count == 1:
             text = (
                 f"1 Prinzipschema ausgewählt: "
                 f"{self.schema_pdfs[0].name}"
             )
         else:
-            text = (
-                f"{count} Prinzipschemata ausgewählt"
-            )
+            text = f"{count} Prinzipschemata ausgewählt"
 
         self.schema_label.config(
             text=text
@@ -1030,23 +1283,17 @@ class LuftmengenGUI:
             initial_directory = str(
                 self.output_dir
             )
-
         elif self.floorplan_pdfs:
             initial_directory = str(
                 self.floorplan_pdfs[0].parent
             )
 
-        dialog_arguments: dict[
-            str,
-            object,
-        ] = {
+        dialog_arguments: dict[str, object] = {
             "title": "Ausgabeordner auswählen",
         }
 
         if initial_directory is not None:
-            dialog_arguments[
-                "initialdir"
-            ] = initial_directory
+            dialog_arguments["initialdir"] = initial_directory
 
         folder = filedialog.askdirectory(
             **dialog_arguments
@@ -1067,14 +1314,9 @@ class LuftmengenGUI:
         self,
         _event: object | None = None,
     ) -> None:
-        selected_label = (
-            self.room_pattern_var.get()
-        )
+        selected_label = self.room_pattern_var.get()
 
-        if (
-            selected_label
-            == CUSTOM_PATTERN_LABEL
-        ):
+        if selected_label == CUSTOM_PATTERN_LABEL:
             self.custom_pattern_entry.config(
                 state="normal"
             )
@@ -1089,14 +1331,9 @@ class LuftmengenGUI:
         self.update_pattern_description()
 
     def update_pattern_description(self) -> None:
-        selected_label = (
-            self.room_pattern_var.get()
-        )
+        selected_label = self.room_pattern_var.get()
 
-        if (
-            selected_label
-            == CUSTOM_PATTERN_LABEL
-        ):
+        if selected_label == CUSTOM_PATTERN_LABEL:
             description = (
                 "Sonderformat für besondere "
                 "Raumnummern. Beispiel für "
@@ -1105,15 +1342,12 @@ class LuftmengenGUI:
             )
 
         else:
-            preset_key = (
-                self.pattern_labels_to_keys.get(
-                    selected_label
-                )
+            preset_key = self.pattern_labels_to_keys.get(
+                selected_label
             )
 
             if preset_key is None:
                 description = ""
-
             else:
                 description = (
                     ROOM_PATTERN_PRESETS[
@@ -1121,10 +1355,7 @@ class LuftmengenGUI:
                     ]["description"]
                 )
 
-                if (
-                    preset_key
-                    == "usz_standard"
-                ):
+                if preset_key == "usz_standard":
                     description += (
                         " Nominal und Havarie "
                         "werden automatisch erkannt."
@@ -1136,18 +1367,10 @@ class LuftmengenGUI:
 
     def get_selected_room_pattern(
         self,
-    ) -> tuple[
-        str,
-        str | None,
-    ]:
-        selected_label = (
-            self.room_pattern_var.get()
-        )
+    ) -> tuple[str, str | None]:
+        selected_label = self.room_pattern_var.get()
 
-        if (
-            selected_label
-            == CUSTOM_PATTERN_LABEL
-        ):
+        if selected_label == CUSTOM_PATTERN_LABEL:
             custom_pattern = (
                 self.custom_pattern_var
                 .get()
@@ -1164,7 +1387,6 @@ class LuftmengenGUI:
                 re.compile(
                     custom_pattern
                 )
-
             except re.error as error:
                 raise ValueError(
                     "Das benutzerdefinierte "
@@ -1177,10 +1399,8 @@ class LuftmengenGUI:
                 custom_pattern,
             )
 
-        preset_key = (
-            self.pattern_labels_to_keys.get(
-                selected_label
-            )
+        preset_key = self.pattern_labels_to_keys.get(
+            selected_label
         )
 
         if preset_key is None:
@@ -1198,7 +1418,6 @@ class LuftmengenGUI:
         self,
         message: str,
     ) -> None:
-        """Aktualisiert Status und Fortschritt anhand der Programmmeldung."""
         self.status.config(
             text=message,
             fg=MUTED_TEXT_COLOR,
@@ -1224,29 +1443,26 @@ class LuftmengenGUI:
         self,
         message: str,
     ) -> None:
-        """Leitet Statusmeldungen sicher an den GUI-Thread weiter."""
         self.root.after(
             0,
             self.update_progress_from_message,
             message,
         )
 
-    def set_running_state(
+    def set_lueftung_running_state(
         self,
         running: bool,
     ) -> None:
-        """Aktiviert oder deaktiviert Eingabeelemente."""
         widget_state = (
             "disabled"
             if running
             else "normal"
         )
 
-        for widget in self.interactive_widgets:
+        for widget in self.lueftung_widgets:
             try:
                 if (
-                    widget
-                    is self.custom_pattern_entry
+                    widget is self.custom_pattern_entry
                     and not running
                     and self.room_pattern_var.get()
                     != CUSTOM_PATTERN_LABEL
@@ -1255,10 +1471,7 @@ class LuftmengenGUI:
                         state="disabled"
                     )
 
-                elif (
-                    widget
-                    is self.pattern_combobox
-                ):
+                elif widget is self.pattern_combobox:
                     widget.config(
                         state=(
                             "disabled"
@@ -1284,34 +1497,29 @@ class LuftmengenGUI:
             text=(
                 "Vergleich läuft …"
                 if running
-                else "Vergleich starten"
+                else "Luftmengenvergleich starten"
             ),
         )
 
-    def validate_inputs(self) -> None:
-        """Prüft die Eingaben vor dem Start."""
+    def validate_lueftung_inputs(self) -> None:
         if not self.floorplan_pdfs:
             raise ValueError(
-                "Bitte mindestens einen "
-                "Grundriss auswählen."
+                "Bitte mindestens einen Grundriss auswählen."
             )
 
         if not self.schema_pdfs:
             raise ValueError(
-                "Bitte mindestens ein "
-                "Prinzipschema auswählen."
+                "Bitte mindestens ein Prinzipschema auswählen."
             )
 
         if self.output_dir is None:
             raise ValueError(
-                "Bitte einen Ausgabeordner "
-                "auswählen."
+                "Bitte einen Ausgabeordner auswählen."
             )
 
-    def start(self) -> None:
-        """Validiert die Eingaben und startet den Vergleich."""
+    def start_lueftung(self) -> None:
         try:
-            self.validate_inputs()
+            self.validate_lueftung_inputs()
 
             (
                 room_pattern_key,
@@ -1323,7 +1531,6 @@ class LuftmengenGUI:
                 "Eingabe prüfen",
                 str(error),
             )
-
             return
 
         self.progress.config(
@@ -1335,12 +1542,12 @@ class LuftmengenGUI:
             fg=MUTED_TEXT_COLOR,
         )
 
-        self.set_running_state(
+        self.set_lueftung_running_state(
             True
         )
 
         worker = threading.Thread(
-            target=self.run_comparison_worker,
+            target=self.run_lueftung_worker,
             args=(
                 room_pattern_key,
                 custom_room_pattern,
@@ -1350,12 +1557,11 @@ class LuftmengenGUI:
 
         worker.start()
 
-    def run_comparison_worker(
+    def run_lueftung_worker(
         self,
         room_pattern_key: str,
         custom_room_pattern: str | None,
     ) -> None:
-        """Führt die zeitintensive Verarbeitung im Hintergrund aus."""
         try:
             results = run_comparison(
                 floorplan_pdfs=self.floorplan_pdfs,
@@ -1368,37 +1574,31 @@ class LuftmengenGUI:
 
             self.root.after(
                 0,
-                self.handle_success,
+                self.handle_lueftung_success,
                 results,
             )
 
         except Exception as error:
             self.root.after(
                 0,
-                self.handle_error,
+                self.handle_lueftung_error,
                 error,
             )
 
-    def handle_success(
+    def handle_lueftung_success(
         self,
-        results: dict[
-            str,
-            object,
-        ],
+        results: dict[str, object],
     ) -> None:
-        """Behandelt einen erfolgreichen Programmabschluss."""
         self.progress.config(
             value=6
         )
 
         self.status.config(
-            text=(
-                "Vergleich erfolgreich abgeschlossen."
-            ),
+            text="Vergleich erfolgreich abgeschlossen.",
             fg=SUCCESS_COLOR,
         )
 
-        self.set_running_state(
+        self.set_lueftung_running_state(
             False
         )
 
@@ -1414,10 +1614,7 @@ class LuftmengenGUI:
 
         pdf_count = (
             len(output_pdfs)
-            if isinstance(
-                output_pdfs,
-                list,
-            )
+            if isinstance(output_pdfs, list)
             else 0
         )
 
@@ -1431,11 +1628,10 @@ class LuftmengenGUI:
             ),
         )
 
-    def handle_error(
+    def handle_lueftung_error(
         self,
         error: Exception,
     ) -> None:
-        """Behandelt einen Fehler aus dem Hintergrundprozess."""
         self.status.config(
             text=(
                 "Bei der Verarbeitung ist "
@@ -1444,7 +1640,313 @@ class LuftmengenGUI:
             fg=ERROR_COLOR,
         )
 
-        self.set_running_state(
+        self.set_lueftung_running_state(
+            False
+        )
+
+        messagebox.showerror(
+            "Fehler",
+            str(error),
+        )
+
+    def add_hk_pair(self) -> None:
+        pair_number = len(
+            self.hk_pairs
+        ) + 1
+
+        schema_pdf = filedialog.askopenfilename(
+            title=f"Paar {pair_number}: Prinzipschema-PDF auswählen",
+            filetypes=[
+                (
+                    "PDF-Dateien",
+                    "*.pdf",
+                ),
+            ],
+        )
+
+        if not schema_pdf:
+            return
+
+        bml_excel = filedialog.askopenfilename(
+            title=f"Paar {pair_number}: Passende BML-Excel auswählen",
+            filetypes=[
+                (
+                    "Excel-Dateien",
+                    "*.xlsx",
+                ),
+            ],
+        )
+
+        if not bml_excel:
+            return
+
+        default_name = Path(
+            schema_pdf
+        ).stem
+
+        pair_name = simpledialog.askstring(
+            title=f"Paar {pair_number}: Name",
+            prompt=(
+                "Wie soll diese Auswertung heissen?\n\n"
+                "Beispiele:\n"
+                "- Heizung_Kaelte\n"
+                "- Verteilung_MIT1\n"
+                "- Verteilung_MIT2"
+            ),
+            initialvalue=default_name,
+        )
+
+        if pair_name is None or not pair_name.strip():
+            pair_name = default_name
+
+        self.hk_pairs.append(
+            {
+                "name": pair_name.strip(),
+                "schema_pdf": schema_pdf,
+                "bml_excel": bml_excel,
+            }
+        )
+
+        self.update_hk_pairs_label()
+
+    def clear_hk_pairs(self) -> None:
+        self.hk_pairs.clear()
+        self.update_hk_pairs_label()
+
+    def update_hk_pairs_label(self) -> None:
+        if not self.hk_pairs:
+            text = "Keine Paare ausgewählt"
+        else:
+            lines = [
+                f"{index}. {pair['name']}"
+                for index, pair
+                in enumerate(
+                    self.hk_pairs,
+                    start=1,
+                )
+            ]
+
+            text = "\n".join(
+                lines
+            )
+
+        self.hk_pairs_label.config(
+            text=text
+        )
+
+    def choose_hk_output(self) -> None:
+        initial_directory: str | None = None
+
+        if self.hk_output_dir is not None:
+            initial_directory = str(
+                self.hk_output_dir
+            )
+
+        dialog_arguments: dict[str, object] = {
+            "title": "Ausgabeordner auswählen",
+        }
+
+        if initial_directory is not None:
+            dialog_arguments["initialdir"] = initial_directory
+
+        folder = filedialog.askdirectory(
+            **dialog_arguments
+        )
+
+        if folder:
+            self.hk_output_dir = Path(
+                folder
+            )
+
+            self.hk_output_label.config(
+                text=str(
+                    self.hk_output_dir
+                )
+            )
+
+    def validate_hk_inputs(self) -> None:
+        if not self.hk_pairs:
+            raise ValueError(
+                "Bitte mindestens ein Schema/BML-Paar hinzufügen."
+            )
+
+        if self.hk_output_dir is None:
+            raise ValueError(
+                "Bitte einen Ausgabeordner auswählen."
+            )
+
+    def set_hk_running_state(
+        self,
+        running: bool,
+    ) -> None:
+        widget_state = (
+            "disabled"
+            if running
+            else "normal"
+        )
+
+        for widget in self.hk_widgets:
+            try:
+                widget.config(
+                    state=widget_state
+                )
+            except tk.TclError:
+                pass
+
+        self.hk_start_button.config(
+            state=(
+                "disabled"
+                if running
+                else "normal"
+            ),
+            text=(
+                "HK-Kontrolle läuft …"
+                if running
+                else "HK-Nummernkontrolle starten"
+            ),
+        )
+
+    def start_hk(self) -> None:
+        try:
+            self.validate_hk_inputs()
+
+        except Exception as error:
+            messagebox.showerror(
+                "Eingabe prüfen",
+                str(error),
+            )
+            return
+
+        self.hk_progress.config(
+            maximum=max(
+                len(self.hk_pairs),
+                1,
+            ),
+            value=0,
+        )
+
+        self.hk_status.config(
+            text="HK-Nummernkontrolle wird vorbereitet …",
+            fg=MUTED_TEXT_COLOR,
+        )
+
+        self.set_hk_running_state(
+            True
+        )
+
+        worker = threading.Thread(
+            target=self.run_hk_worker,
+            daemon=True,
+        )
+
+        worker.start()
+
+    def run_hk_worker(self) -> None:
+        try:
+            output_paths: list[Path] = []
+
+            for index, pair in enumerate(
+                self.hk_pairs,
+                start=1,
+            ):
+                self.root.after(
+                    0,
+                    self.update_hk_progress,
+                    index - 1,
+                    (
+                        f"{index}/{len(self.hk_pairs)} "
+                        f"wird verarbeitet: {pair['name']}"
+                    ),
+                )
+
+                output_path = run_hk_number_check(
+                    schema_pdf=pair["schema_pdf"],
+                    bml_excel=pair["bml_excel"],
+                    output_dir=self.hk_output_dir,
+                    name=(
+                        f"HK_Nummernkontrolle_"
+                        f"{index}_{pair['name']}"
+                    ),
+                )
+
+                output_paths.append(
+                    output_path
+                )
+
+            self.root.after(
+                0,
+                self.handle_hk_success,
+                output_paths,
+            )
+
+        except Exception as error:
+            self.root.after(
+                0,
+                self.handle_hk_error,
+                error,
+            )
+
+    def update_hk_progress(
+        self,
+        value: int,
+        message: str,
+    ) -> None:
+        self.hk_progress.config(
+            value=value
+        )
+
+        self.hk_status.config(
+            text=message,
+            fg=MUTED_TEXT_COLOR,
+        )
+
+    def handle_hk_success(
+        self,
+        output_paths: list[Path],
+    ) -> None:
+        self.hk_progress.config(
+            value=len(
+                output_paths
+            )
+        )
+
+        self.hk_status.config(
+            text="HK-Nummernkontrolle erfolgreich abgeschlossen.",
+            fg=SUCCESS_COLOR,
+        )
+
+        self.set_hk_running_state(
+            False
+        )
+
+        result_text = "\n".join(
+            str(path)
+            for path in output_paths
+        )
+
+        messagebox.showinfo(
+            "HK-Nummernkontrolle abgeschlossen",
+            (
+                "Die HK-Nummernkontrolle wurde "
+                "erfolgreich abgeschlossen.\n\n"
+                f"Erstellte Dateien: {len(output_paths)}\n\n"
+                f"{result_text}"
+            ),
+        )
+
+    def handle_hk_error(
+        self,
+        error: Exception,
+    ) -> None:
+        self.hk_status.config(
+            text=(
+                "Bei der HK-Nummernkontrolle ist "
+                "ein Fehler aufgetreten."
+            ),
+            fg=ERROR_COLOR,
+        )
+
+        self.set_hk_running_state(
             False
         )
 
