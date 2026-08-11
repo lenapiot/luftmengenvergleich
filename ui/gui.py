@@ -49,8 +49,8 @@ class LuftmengenGUI:
             f"Planvergleich – Version {APP_VERSION}"
         )
 
-        self.root.geometry("980x860")
-        self.root.minsize(920, 800)
+        self.root.geometry("1200x1100")
+        self.root.minsize(920, 820)
 
         self.root.configure(
             bg=BACKGROUND_COLOR
