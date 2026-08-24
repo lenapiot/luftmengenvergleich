@@ -8,13 +8,65 @@ from pathlib import Path
 import fitz
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill 
+from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
+# ============================================================
+# POSITIONSNUMMERN
+# ============================================================
+#
+# Allgemeines Format nach Rückmeldung:
+#
+#   1–2 Buchstaben + 1–3 Zahlen
+#   .
+#   1–3 Zahlen
+#   optional:
+#   . + genau 1 Zahl
+#
+# Beispiele:
+#   F24.527
+#   F24.527.1
+#   F24.527.2
+#   D24.028
+#   ZV70.01
+#   ZV70.12
+#   A1.2
+#   A1.23
+#   A1.234
+#   AB123.1
+#   AB123.123.4
+#
+# "STA" bleibt als bereits unterstützte Alt-Ausnahme erhalten,
+# damit bestehende Schemen nicht verschlechtert werden.
+#
+# Das Muster erlaubt außerdem Leerzeichen innerhalb einer Nummer,
+# wie sie durch PDF-Export entstehen können:
+#
+#   F 2 4 . 5 2 7 . 1
+#   Z V 7 0 . 0 1
+#
+# Diese werden anschließend zu F24.527.1 bzw. ZV70.01 normalisiert.
+# ============================================================
+
 POSITION_PATTERN = re.compile(
-    r"\b(?:STA|SF|AK|DP|ZV|[AFMPRSV])\s*\d+\s*\.\s*\d+\b",
-    re.IGNORECASE,
+    r"""
+    (?<![A-Z0-9])
+    (?:
+        STA
+        |
+        [A-Z]\s*(?:[A-Z]\s*)?
+    )
+    (?:\d\s*){1,3}
+    \.\s*
+    (?:\d\s*){1,3}
+    (?:
+        \.\s*\d
+    )?
+    (?!\s*\.\s*\d)
+    (?![A-Z0-9])
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -26,29 +78,57 @@ class PositionRecord:
     seite: int | None = None
 
 
-def normalize_position_number(value: object) -> str | None:
-    """Normalisiert Positionsnummern wie 'F8 0 . 2 1' zu 'F80.21'."""
+# ============================================================
+# NORMALISIERUNG / SUCHE
+# ============================================================
+
+def normalize_position_number(
+    value: object,
+) -> str | None:
+    """
+    Normalisiert eine Positionsnummer.
+
+    Beispiele:
+        F8 0 . 2 1       -> F80.21
+        F 2 4 . 5 2 7.1 -> F24.527.1
+        Z V 7 0 . 0 1   -> ZV70.01
+    """
     if value is None:
         return None
 
-    text = str(value).strip()
+    text = str(
+        value
+    ).strip()
 
     if not text:
         return None
 
     text = (
-        text.replace("\u00a0", " ")
-        .replace("\n", " ")
-        .replace("\t", " ")
+        text.replace(
+            "\u00a0",
+            " ",
+        )
+        .replace(
+            "\n",
+            " ",
+        )
+        .replace(
+            "\t",
+            " ",
+        )
         .upper()
     )
 
-    match = POSITION_PATTERN.search(text)
+    match = POSITION_PATTERN.search(
+        text
+    )
 
     if not match:
         return None
 
-    number = match.group(0)
+    number = match.group(
+        0
+    )
 
     number = re.sub(
         r"\s+",
@@ -56,39 +136,139 @@ def normalize_position_number(value: object) -> str | None:
         number,
     )
 
+    # --------------------------------------------------------
+    # ZV-NUMMERN: FÜHRENDE NULL WIEDERHERSTELLEN
+    # --------------------------------------------------------
+    #
+    # Im MIT1-Strangschema liefert die PDF-Textextraktion z. B.
+    # "ZV70.1", obwohl die Positionsnummer im Plan als "ZV70.01"
+    # geführt wird. Die führende Null ist im extrahierten PDF-Text
+    # selbst nicht vorhanden und kann deshalb nicht einfach
+    # "erhalten" werden.
+    #
+    # Für ZV-Positionsnummern ist der Teil nach dem ersten Punkt
+    # zweistellig. Deshalb wird nur bei ZV und nur bei genau einer
+    # Ziffer automatisch eine führende Null ergänzt:
+    #
+    #   ZV70.1   -> ZV70.01
+    #   ZV70.9   -> ZV70.09
+    #   ZV70.10  -> ZV70.10
+    #   ZV70.12  -> ZV70.12
+    #
+    # Ein optionaler letzter Teil bleibt unverändert:
+    #
+    #   ZV70.1.2 -> ZV70.01.2
+    #
+    # Andere Präfixe werden NICHT aufgefüllt, weil Formate wie
+    # P70.1 oder F1.2 laut allgemeiner Regel gültig sein können.
+    parts = number.split(".")
+
+    if (
+        parts
+        and parts[0].startswith("ZV")
+        and len(parts) >= 2
+        and len(parts[1]) == 1
+        and parts[1].isdigit()
+    ):
+        parts[1] = parts[1].zfill(2)
+        number = ".".join(parts)
+
     return number
 
 
-def find_position_numbers(text: str) -> list[str]:
-    """Findet alle Positionsnummern in einem Text."""
+def find_position_numbers(
+    text: str,
+) -> list[str]:
+    """
+    Findet alle Positionsnummern in einem Text.
+
+    Wichtig:
+    F24.527.1 und F24.527.2 werden als zwei verschiedene
+    vollständige Nummern erkannt und nicht beide auf F24.527 gekürzt.
+    """
+    if not text:
+        return []
+
+    prepared = (
+        str(
+            text
+        )
+        .replace(
+            "\u00a0",
+            " ",
+        )
+        .replace(
+            "\n",
+            " ",
+        )
+        .replace(
+            "\t",
+            " ",
+        )
+        .upper()
+    )
+
     numbers: list[str] = []
 
-    for match in POSITION_PATTERN.finditer(text):
+    for match in POSITION_PATTERN.finditer(
+        prepared
+    ):
         number = normalize_position_number(
-            match.group(0)
+            match.group(
+                0
+            )
         )
 
         if number is not None:
-            numbers.append(number)
+            numbers.append(
+                number
+            )
 
     return numbers
 
 
-def color_int_to_rgb(color: int) -> tuple[int, int, int]:
-    """Wandelt eine PyMuPDF-Farbe in RGB um."""
-    red = (color >> 16) & 255
-    green = (color >> 8) & 255
-    blue = color & 255
+# ============================================================
+# PDF-FARBEN
+# ============================================================
 
-    return red, green, blue
+def color_int_to_rgb(
+    color: int,
+) -> tuple[int, int, int]:
+    """
+    Wandelt eine PyMuPDF-Farbe in RGB um.
+    """
+    red = (
+        color
+        >> 16
+    ) & 255
+
+    green = (
+        color
+        >> 8
+    ) & 255
+
+    blue = (
+        color
+    ) & 255
+
+    return (
+        red,
+        green,
+        blue,
+    )
 
 
-def is_blueish(color: int) -> bool:
+def is_blueish(
+    color: int,
+) -> bool:
     """
     Prüft, ob eine Textfarbe blau/türkis ist.
 
-    In den Schemata sind die relevanten Nummern meist türkis/blau.
-    Beispiel PyMuPDF-Farbe: 65535 = RGB(0, 255, 255).
+    In den Schemata sind die relevanten Nummern meist
+    türkis/blau.
+
+    Beispiel PyMuPDF-Farbe:
+        65535 = RGB(0, 255, 255)
     """
     red, green, blue = color_int_to_rgb(
         color
@@ -101,16 +281,88 @@ def is_blueish(color: int) -> bool:
     )
 
 
+# ============================================================
+# SCHEMA-PDF
+# ============================================================
+
+def _line_text_for_position_search(
+    line: dict,
+    only_blue: bool,
+) -> str:
+    """
+    Baut den Suchtext einer PDF-Zeile aus ihren Spans zusammen.
+
+    Das ist wichtig, weil eine Positionsnummer im PDF intern auf
+    mehrere Spans verteilt sein kann, z. B.:
+
+        "ZV" | "70" | "." | "01"
+
+    Die alte spanweise Suche konnte solche Nummern übersehen.
+    Jetzt wird daraus:
+
+        "ZV 70 . 01"
+
+    und das tolerante Regex erkennt korrekt ZV70.01.
+    """
+    pieces: list[str] = []
+
+    for span in line.get(
+        "spans",
+        [],
+    ):
+        text = str(
+            span.get(
+                "text",
+                "",
+            )
+        )
+
+        if not text.strip():
+            continue
+
+        color = int(
+            span.get(
+                "color",
+                0,
+            )
+        )
+
+        if (
+            only_blue
+            and not is_blueish(
+                color
+            )
+        ):
+            continue
+
+        pieces.append(
+            text
+        )
+
+    return " ".join(
+        pieces
+    )
+
+
 def extract_schema_positions(
     pdf_path: str | Path,
     only_blue: bool = True,
 ) -> pd.DataFrame:
-    """Extrahiert Positionsnummern aus einem Schema-PDF."""
+    """
+    Extrahiert Positionsnummern aus einem Schema-PDF.
+
+    Verbesserung gegenüber der alten Version:
+    Die Suche erfolgt zeilenweise über alle relevanten blauen Spans
+    gemeinsam. Dadurch werden auch aufgesplittete Nummern wie
+    ZV70.01 bis ZV70.12 zuverlässiger erkannt.
+    """
     pdf_path = Path(
         pdf_path
     )
 
-    records: list[PositionRecord] = []
+    records: list[
+        PositionRecord
+    ] = []
 
     document = fitz.open(
         pdf_path
@@ -133,40 +385,26 @@ def extract_schema_positions(
                     "lines",
                     [],
                 ):
-                    for span in line.get(
-                        "spans",
-                        [],
-                    ):
-                        text = span.get(
-                            "text",
-                            "",
+                    line_text = (
+                        _line_text_for_position_search(
+                            line,
+                            only_blue=only_blue,
                         )
+                    )
 
-                        color = int(
-                            span.get(
-                                "color",
-                                0,
+                    positions = find_position_numbers(
+                        line_text
+                    )
+
+                    for position in positions:
+                        records.append(
+                            PositionRecord(
+                                positionsnummer=position,
+                                quelle="Schema",
+                                datei=pdf_path.name,
+                                seite=page_index,
                             )
                         )
-
-                        if only_blue and not is_blueish(
-                            color
-                        ):
-                            continue
-
-                        positions = find_position_numbers(
-                            text
-                        )
-
-                        for position in positions:
-                            records.append(
-                                PositionRecord(
-                                    positionsnummer=position,
-                                    quelle="Schema",
-                                    datei=pdf_path.name,
-                                    seite=page_index,
-                                )
-                            )
 
     finally:
         document.close()
@@ -175,9 +413,19 @@ def extract_schema_positions(
         [
             record.__dict__
             for record in records
-        ]
+        ],
+        columns=[
+            "positionsnummer",
+            "quelle",
+            "datei",
+            "seite",
+        ],
     )
 
+
+# ============================================================
+# BML-EXCEL
+# ============================================================
 
 def find_header_row_and_position_column(
     excel_path: str | Path,
@@ -196,11 +444,17 @@ def find_header_row_and_position_column(
         data_only=True,
     )
 
-    worksheet = workbook[
-        sheet_name
-    ]
-
     try:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(
+                f"Das Tabellenblatt '{sheet_name}' wurde "
+                "in der Excel-Datei nicht gefunden."
+            )
+
+        worksheet = workbook[
+            sheet_name
+        ]
+
         for row in range(
             1,
             min(
@@ -211,7 +465,8 @@ def find_header_row_and_position_column(
         ):
             for column in range(
                 1,
-                worksheet.max_column + 1,
+                worksheet.max_column
+                + 1,
             ):
                 value = worksheet.cell(
                     row=row,
@@ -222,10 +477,15 @@ def find_header_row_and_position_column(
                     continue
 
                 normalized = (
-                    str(value)
+                    str(
+                        value
+                    )
                     .strip()
                     .lower()
-                    .replace(" ", "")
+                    .replace(
+                        " ",
+                        "",
+                    )
                 )
 
                 if normalized in {
@@ -234,7 +494,10 @@ def find_header_row_and_position_column(
                     "posnr.",
                     "posnr",
                 }:
-                    return row, column
+                    return (
+                        row,
+                        column,
+                    )
 
     finally:
         workbook.close()
@@ -248,12 +511,17 @@ def extract_excel_positions(
     excel_path: str | Path,
     sheet_name: str = "Tabelle1",
 ) -> pd.DataFrame:
-    """Extrahiert Positionsnummern aus der BML-Exceldatei."""
+    """
+    Extrahiert Positionsnummern aus der BML-Exceldatei.
+    """
     excel_path = Path(
         excel_path
     )
 
-    header_row, position_column = find_header_row_and_position_column(
+    (
+        header_row,
+        position_column,
+    ) = find_header_row_and_position_column(
         excel_path=excel_path,
         sheet_name=sheet_name,
     )
@@ -264,11 +532,15 @@ def extract_excel_positions(
         header=header_row - 1,
     )
 
-    position_column_name = dataframe.columns[
-        position_column - 1
-    ]
+    position_column_name = (
+        dataframe.columns[
+            position_column - 1
+        ]
+    )
 
-    records: list[PositionRecord] = []
+    records: list[
+        PositionRecord
+    ] = []
 
     for value in dataframe[
         position_column_name
@@ -293,32 +565,66 @@ def extract_excel_positions(
         [
             record.__dict__
             for record in records
-        ]
+        ],
+        columns=[
+            "positionsnummer",
+            "quelle",
+            "datei",
+            "seite",
+        ],
     )
 
+
+# ============================================================
+# VERGLEICH
+# ============================================================
 
 def determine_status(
     schema_count: int,
     excel_count: int,
 ) -> str:
-    """Bestimmt den Vergleichsstatus."""
-    if schema_count > 1 and excel_count > 1:
-        return "Mehrfach in beiden"
+    """
+    Bestimmt den Vergleichsstatus.
+    """
+    if (
+        schema_count > 1
+        and excel_count > 1
+    ):
+        return (
+            "Mehrfach in beiden"
+        )
 
     if schema_count > 1:
-        return "Mehrfach im Schema"
+        return (
+            "Mehrfach im Schema"
+        )
 
     if excel_count > 1:
-        return "Mehrfach in Excel"
+        return (
+            "Mehrfach in Excel"
+        )
 
-    if schema_count == 1 and excel_count == 1:
+    if (
+        schema_count == 1
+        and excel_count == 1
+    ):
         return "OK"
 
-    if schema_count == 1 and excel_count == 0:
-        return "Nur im Schema"
+    if (
+        schema_count == 1
+        and excel_count == 0
+    ):
+        return (
+            "Nur im Schema"
+        )
 
-    if schema_count == 0 and excel_count == 1:
-        return "Nur in Excel"
+    if (
+        schema_count == 0
+        and excel_count == 1
+    ):
+        return (
+            "Nur in Excel"
+        )
 
     return "Unklar"
 
@@ -327,15 +633,21 @@ def compare_positions(
     schema_df: pd.DataFrame,
     excel_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Vergleicht Positionsnummern aus Schema und Excel."""
+    """
+    Vergleicht Positionsnummern aus Schema und Excel.
+    """
     schema_numbers = (
-        schema_df["positionsnummer"].tolist()
+        schema_df[
+            "positionsnummer"
+        ].tolist()
         if not schema_df.empty
         else []
     )
 
     excel_numbers = (
-        excel_df["positionsnummer"].tolist()
+        excel_df[
+            "positionsnummer"
+        ].tolist()
         if not excel_df.empty
         else []
     )
@@ -349,11 +661,17 @@ def compare_positions(
     )
 
     all_numbers = sorted(
-        set(schema_counter)
-        | set(excel_counter)
+        set(
+            schema_counter
+        )
+        | set(
+            excel_counter
+        )
     )
 
-    rows: list[dict[str, object]] = []
+    rows: list[
+        dict[str, object]
+    ] = []
 
     for number in all_numbers:
         schema_count = schema_counter.get(
@@ -368,18 +686,31 @@ def compare_positions(
 
         rows.append(
             {
-                "Positionsnummer": number,
-                "Status": determine_status(
+                "Positionsnummer":
+                    number,
+
+                "Status":
+                    determine_status(
+                        schema_count,
+                        excel_count,
+                    ),
+
+                "Anzahl Schema":
                     schema_count,
+
+                "Anzahl Excel":
                     excel_count,
-                ),
-                "Anzahl Schema": schema_count,
-                "Anzahl Excel": excel_count,
             }
         )
 
     result = pd.DataFrame(
-        rows
+        rows,
+        columns=[
+            "Positionsnummer",
+            "Status",
+            "Anzahl Schema",
+            "Anzahl Excel",
+        ],
     )
 
     if result.empty:
@@ -395,23 +726,37 @@ def compare_positions(
         "OK": 6,
     }
 
-    result["_sort"] = result["Status"].map(
+    result[
+        "_sort"
+    ] = result[
+        "Status"
+    ].map(
         status_order
     )
 
-    result = result.sort_values(
-        by=[
-            "_sort",
-            "Positionsnummer",
-        ]
-    ).drop(
-        columns=[
-            "_sort",
-        ]
+    result = (
+        result.sort_values(
+            by=[
+                "_sort",
+                "Positionsnummer",
+            ]
+        )
+        .drop(
+            columns=[
+                "_sort",
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     return result
 
+
+# ============================================================
+# EXCEL-AUSGABE
+# ============================================================
 
 def export_result(
     comparison_df: pd.DataFrame,
@@ -419,7 +764,9 @@ def export_result(
     excel_df: pd.DataFrame,
     output_path: str | Path,
 ) -> None:
-    """Exportiert den Vergleich als Excel-Datei."""
+    """
+    Exportiert den Vergleich als Excel-Datei.
+    """
     output_path = Path(
         output_path
     )
@@ -454,7 +801,9 @@ def export_result(
 def format_excel_output(
     output_path: str | Path,
 ) -> None:
-    """Formatiert die Excel-Auswertung."""
+    """
+    Formatiert die Excel-Auswertung.
+    """
     workbook = load_workbook(
         output_path
     )
@@ -470,13 +819,21 @@ def format_excel_output(
     }
 
     for worksheet in workbook.worksheets:
-        worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = worksheet.dimensions
+        worksheet.freeze_panes = (
+            "A2"
+        )
 
-        for cell in worksheet[1]:
+        worksheet.auto_filter.ref = (
+            worksheet.dimensions
+        )
+
+        for cell in worksheet[
+            1
+        ]:
             cell.font = Font(
                 bold=True
             )
+
             cell.fill = PatternFill(
                 fill_type="solid",
                 fgColor="D9EAF7",
@@ -484,15 +841,24 @@ def format_excel_output(
 
         for column_cells in worksheet.columns:
             max_length = 0
-            column_letter = get_column_letter(
-                column_cells[0].column
+
+            column_letter = (
+                get_column_letter(
+                    column_cells[
+                        0
+                    ].column
+                )
             )
 
             for cell in column_cells:
                 if cell.value is not None:
                     max_length = max(
                         max_length,
-                        len(str(cell.value)),
+                        len(
+                            str(
+                                cell.value
+                            )
+                        ),
                     )
 
             worksheet.column_dimensions[
@@ -508,20 +874,27 @@ def format_excel_output(
 
     status_column = None
 
-    for cell in comparison_sheet[1]:
+    for cell in comparison_sheet[
+        1
+    ]:
         if cell.value == "Status":
-            status_column = cell.column
+            status_column = (
+                cell.column
+            )
             break
 
     if status_column is not None:
         for row in range(
             2,
-            comparison_sheet.max_row + 1,
+            comparison_sheet.max_row
+            + 1,
         ):
-            status = comparison_sheet.cell(
-                row=row,
-                column=status_column,
-            ).value
+            status = (
+                comparison_sheet.cell(
+                    row=row,
+                    column=status_column,
+                ).value
+            )
 
             color = status_colors.get(
                 status
@@ -530,7 +903,8 @@ def format_excel_output(
             if color:
                 for column in range(
                     1,
-                    comparison_sheet.max_column + 1,
+                    comparison_sheet.max_column
+                    + 1,
                 ):
                     comparison_sheet.cell(
                         row=row,
@@ -545,13 +919,20 @@ def format_excel_output(
     )
 
 
+# ============================================================
+# HAUPTFUNKTION
+# ============================================================
+
 def run_hk_number_check(
     schema_pdf: str | Path,
     bml_excel: str | Path,
     output_dir: str | Path,
     name: str = "HK_Nummernkontrolle",
 ) -> Path:
-    """Führt die komplette Nummernkontrolle für ein PDF-Excel-Paar aus."""
+    """
+    Führt die komplette Nummernkontrolle
+    für ein PDF-Excel-Paar aus.
+    """
     schema_pdf = Path(
         schema_pdf
     )
@@ -569,27 +950,38 @@ def run_hk_number_check(
         exist_ok=True,
     )
 
-    schema_df = extract_schema_positions(
-        schema_pdf,
-        only_blue=True,
+    schema_df = (
+        extract_schema_positions(
+            schema_pdf,
+            only_blue=True,
+        )
     )
 
-    excel_df = extract_excel_positions(
-        bml_excel,
+    excel_df = (
+        extract_excel_positions(
+            bml_excel
+        )
     )
 
-    comparison_df = compare_positions(
-        schema_df,
-        excel_df,
+    comparison_df = (
+        compare_positions(
+            schema_df,
+            excel_df,
+        )
     )
 
     safe_name = re.sub(
         r"[^A-Za-z0-9_-]+",
         "_",
         name,
-    ).strip("_")
+    ).strip(
+        "_"
+    )
 
-    output_path = output_dir / f"{safe_name}.xlsx"
+    output_path = (
+        output_dir
+        / f"{safe_name}.xlsx"
+    )
 
     export_result(
         comparison_df=comparison_df,

@@ -11,6 +11,8 @@ from config.settings import (
     ROOM_RE,
     MAX_AIRFLOW_DISTANCE,
     ROOM_SEARCH_RADIUS,
+    NUMERIC_ROOM_SEARCH_RADIUS,
+    NUMERIC_FLOOR_ROOM_PATTERN,
 )
 
 
@@ -52,27 +54,215 @@ def normalize_number(value: object) -> int | None:
         return None
 
 
+def is_numeric_floor_room_pattern(
+    room_pattern: re.Pattern[str],
+) -> bool:
+    """
+    Erkennt die feste Option «Numerisch - Geschoss.Raum».
+
+    Der Vergleich über den Pattern-Text hält die Schnittstelle zu den
+    bestehenden Modulen unverändert: run_comparison kann weiterhin einfach
+    das kompilierte Regex an diese Datei übergeben.
+    """
+    return (
+        room_pattern.pattern
+        == NUMERIC_FLOOR_ROOM_PATTERN
+    )
+
+
+def normalize_numeric_room_id(
+    room_id: str,
+) -> str:
+    """
+    Vereinheitlicht numerische Geschoss-/Raumnummern.
+
+    Wichtig:
+    Nur der Geschossteil VOR dem Punkt wird numerisch normalisiert.
+    Der Raumteil NACH dem Punkt bleibt exakt erhalten.
+
+    Beispiele:
+        -01.503 -> -1.503
+        -01.230 -> -1.230
+        -01.200 -> -1.200
+        -01.010 -> -1.010
+        00.302  -> 0.302
+        01.514  -> 1.514
+        02.004  -> 2.004
+        2.4     -> 2.4
+
+    Dadurch bleiben unterschiedliche Räume wie -1.230 und -1.23
+    eindeutig voneinander getrennt.
+    """
+    cleaned = re.sub(
+        r"\s+",
+        "",
+        str(room_id),
+    )
+
+    floor_text, room_text = cleaned.split(
+        ".",
+        1,
+    )
+
+    floor_value = int(
+        floor_text
+    )
+
+    return (
+        f"{floor_value}."
+        f"{room_text}"
+    )
+
+
+def is_plausible_numeric_room_match(
+    line: str,
+    match: re.Match[str],
+) -> bool:
+    """
+    Filtert typische Dezimalzahlen heraus, die keine Raumnummern sind.
+
+    Auf Flächenplänen stehen neben echten Raumnummern viele Werte wie:
+        BF: 41.56 m2
+        RH: 2.885 m
+        OK FB: 3.50
+        OK RB: 3.53
+
+    Diese dürfen nicht als Räume interpretiert werden.
+    """
+    text = re.sub(
+        r"\s+",
+        " ",
+        str(line),
+    ).strip()
+
+    before = text[
+        :match.start()
+    ].strip()
+
+    after = text[
+        match.end():
+    ].strip()
+
+    before_upper = before.upper()
+    after_upper = after.upper()
+
+    # Positive Koten wie +3.88 oder ±0.00 sind keine Raumnummern.
+    if (
+        match.start() > 0
+        and text[
+            match.start() - 1
+        ] in {
+            "+",
+            "±",
+        }
+    ):
+        return False
+
+    # Typische Planattribute direkt vor einer Dezimalzahl.
+    measurement_prefixes = (
+        "BF:",
+        "BF ",
+        "RH:",
+        "RH ",
+        "OK FB:",
+        "OK FB ",
+        "OK RB:",
+        "OK RB ",
+        "UK FB:",
+        "UK RB:",
+        "H:",
+        "B:",
+        "L:",
+        "D:",
+        "R:",
+        "T:",
+    )
+
+    if any(
+        before_upper.endswith(
+            prefix
+        )
+        for prefix in measurement_prefixes
+    ):
+        return False
+
+    # Einheiten direkt hinter einer Dezimalzahl.
+    if re.match(
+        r"^(?:M²|M2|M3|M³|M\\b|MM\\b|CM\\b|°C|%|L/MIN\\b|1/H\\b)",
+        after_upper,
+    ):
+        return False
+
+    # Zusätzliche typische technische Schreibweisen.
+    if re.search(
+        r"(?:^|\\s)(?:BF|RH|OK\\s*FB|OK\\s*RB|UK\\s*FB|UK\\s*RB)\\s*:\\s*$",
+        before_upper,
+    ):
+        return False
+
+    return True
+
+
 def find_room_in_line(
     line: str,
     room_pattern: re.Pattern[str] = ROOM_RE,
 ) -> tuple[str | None, str | None]:
-    """Sucht eine Raumnummer und möglichen Resttext in einer Zeile."""
-    match = room_pattern.search(line or "")
+    """
+    Sucht eine Raumnummer und möglichen Resttext in einer Zeile.
 
-    if not match:
-        return None, None
+    Bei «Numerisch - Geschoss.Raum» werden nicht einfach alle
+    Dezimalzahlen akzeptiert. Typische Flächen-, Höhen- und Kotenwerte
+    werden vorher ausgeschlossen.
+    """
+    text = line or ""
 
-    room_id = match.group(0)
+    numeric_mode = is_numeric_floor_room_pattern(
+        room_pattern
+    )
 
-    rest = (
-        line[:match.start()]
-        + " "
-        + line[match.end():]
-    ).strip()
+    for match in room_pattern.finditer(
+        text
+    ):
+        if (
+            numeric_mode
+            and not is_plausible_numeric_room_match(
+                text,
+                match,
+            )
+        ):
+            continue
 
-    rest = re.sub(r"\s+", " ", rest)
+        room_id = match.group(
+            0
+        )
 
-    return room_id, rest or None
+        if numeric_mode:
+            room_id = normalize_numeric_room_id(
+                room_id
+            )
+
+        rest = (
+            text[
+                :match.start()
+            ]
+            + " "
+            + text[
+                match.end():
+            ]
+        ).strip()
+
+        rest = re.sub(
+            r"\s+",
+            " ",
+            rest,
+        )
+
+        return (
+            room_id,
+            rest or None,
+        )
+
+    return None, None
 
 
 def is_airflow_line(text: str) -> bool:
@@ -196,7 +386,18 @@ def choose_room_candidate(
         for offset in preferred_offsets
     ]
 
-    for distance in range(1, ROOM_SEARCH_RADIUS + 1):
+    search_radius = (
+        NUMERIC_ROOM_SEARCH_RADIUS
+        if is_numeric_floor_room_pattern(
+            room_pattern
+        )
+        else ROOM_SEARCH_RADIUS
+    )
+
+    for distance in range(
+        1,
+        search_radius + 1,
+    ):
         candidate_indices.extend(
             [
                 zul_index - distance,
@@ -413,6 +614,508 @@ def build_airflow_records_from_pair(
         }
     ]
 
+
+
+def extract_ep_number_near_block(
+    lines: list[str],
+    abl_index: int,
+) -> str | None:
+    """
+    Sucht die ep-Nummer direkt nach einem ZUL/ABL-Block.
+
+    Beispiel Grundriss:
+        -1.227
+        ZUL: 9100m3/h
+        ABL: 9500m3/h
+        ep: 219
+    """
+    ep_re = re.compile(
+        r"^\s*ep\s*:\s*(\d{1,5})\s*$",
+        re.IGNORECASE,
+    )
+
+    search_end = min(
+        len(lines),
+        abl_index + 5,
+    )
+
+    for index in range(
+        abl_index + 1,
+        search_end,
+    ):
+        match = ep_re.fullmatch(
+            lines[index].strip()
+        )
+
+        if match:
+            return match.group(1)
+
+    return None
+
+
+
+def is_ep_primary_numeric_mode() -> bool:
+    """
+    Dokumentiert die Regel für «Numerisch - Geschoss.Raum»:
+
+    Vergleichsrelevant sind ausschließlich die von e+p ergänzten
+    Luftmengenblöcke mit ZUL / ABL / ep.
+
+    Die ursprünglichen architektonischen Raumbeschriftungen im Grundriss
+    werden NICHT als zusätzliche Räume in die Rohdaten aufgenommen.
+    Dadurch entstehen keine künstlichen Doppelungen.
+    """
+    return True
+
+def extract_numeric_floorplan_rooms(
+    pdf_path: Path,
+    room_pattern: re.Pattern[str],
+) -> pd.DataFrame:
+    """
+    Extrahiert numerische Grundrissräume inklusive ep-Nummer.
+
+    Für diesen Gebäudetyp ist die ep-Nummer der robuste gemeinsame
+    Schlüssel zwischen Grundriss und Prinzipschema.
+    """
+    records = extract_clean_lines(
+        pdf_path
+    )
+
+    page_lines = split_lines_by_page(
+        records
+    )
+
+    zul_re = re.compile(
+        r"^ZUL\s*:.*?\b([0-9][0-9'’` ]*|\?)\s*(?:m|$)",
+        re.IGNORECASE,
+    )
+
+    abl_re = re.compile(
+        r"^ABL\s*:.*?\b([0-9][0-9'’` ]*|\?)\s*(?:m|$)",
+        re.IGNORECASE,
+    )
+
+    preferred_offsets = [
+        -1,
+        2,
+        -2,
+        3,
+    ]
+
+    rows: list[dict[str, object]] = []
+
+    for page_number, lines in page_lines.items():
+        block_index = 0
+
+        for zul_index in range(
+            len(lines)
+        ):
+            airflow_pair = find_matching_airflow_pair(
+                lines,
+                zul_index,
+                zul_re,
+                abl_re,
+            )
+
+            if airflow_pair is None:
+                continue
+
+            zul_match, abl_match, abl_index = airflow_pair
+
+            room_id, rest, room_index = choose_room_candidate(
+                lines,
+                zul_index,
+                abl_index,
+                preferred_offsets,
+                room_pattern,
+            )
+
+            if room_id is None or room_index is None:
+                continue
+
+            block_index += 1
+
+            room_name = infer_room_name(
+                lines,
+                room_index,
+                zul_index,
+                rest,
+                room_pattern,
+            )
+
+            ep_number = extract_ep_number_near_block(
+                lines,
+                abl_index,
+            )
+
+            fallback_operating_mode = (
+                find_operating_mode_near_block(
+                    lines,
+                    room_index,
+                    zul_index,
+                    abl_index,
+                )
+            )
+
+            airflow_records = build_airflow_records_from_pair(
+                zul_line=lines[zul_index],
+                abl_line=lines[abl_index],
+                zul_match=zul_match,
+                abl_match=abl_match,
+                fallback_operating_mode=fallback_operating_mode,
+            )
+
+            for airflow_record in airflow_records:
+                rows.append(
+                    {
+                        "raumnummer": room_id,
+                        "raumname": room_name,
+                        "betriebsart": airflow_record["betriebsart"],
+                        "zul": airflow_record["zul"],
+                        "abl": airflow_record["abl"],
+                        "seite": page_number,
+                        "block_index": block_index,
+                        "quelle": "grundriss",
+                        "ep_nummer": ep_number,
+                    }
+                )
+
+    columns = [
+        "raumnummer",
+        "raumname",
+        "betriebsart",
+        "zul",
+        "abl",
+        "seite",
+        "block_index",
+        "quelle",
+        "ep_nummer",
+    ]
+
+    if not rows:
+        return pd.DataFrame(
+            columns=columns
+        )
+
+    return (
+        pd.DataFrame(
+            rows,
+            columns=columns,
+        )
+        .drop_duplicates()
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def extract_numeric_schema_blocks(
+    page_lines: dict[int, list[str]],
+) -> pd.DataFrame:
+    """
+    Extrahiert Blöcke aus dem Prinzipschema.
+
+    Im Schema stehen die Überschriften und Werte getrennt, z.B.:
+
+        Zuluft
+        Abluft
+        Anlage
+        Raumfläche
+        ep:
+        9100 m³/h
+        9500 m³/h
+        Küche
+        69.1 m²
+        219
+
+    Daher kann die normale Extraktion, die eine Zahl direkt auf der
+    Zuluft-/Abluftzeile erwartet, diese Blöcke nicht lesen.
+    """
+    airflow_value_re = re.compile(
+        r"^\s*([0-9][0-9'’` ]*|\?)\s*m(?:³|3)/h\s*$",
+        re.IGNORECASE,
+    )
+
+    area_re = re.compile(
+        r"^\s*([0-9]+(?:[.,][0-9]+)?)\s*m(?:²|2)\s*$",
+        re.IGNORECASE,
+    )
+
+    pure_int_re = re.compile(
+        r"^\s*(\d{1,5})\s*$"
+    )
+
+    rows: list[dict[str, object]] = []
+
+    for page_number, lines in page_lines.items():
+        block_index = 0
+
+        for start_index, line in enumerate(
+            lines
+        ):
+            if not re.fullmatch(
+                r"\s*Zuluft\s*",
+                line,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            # Nur typische Raumblock-Kopfzeilen berücksichtigen.
+            window_head = [
+                value.strip().casefold()
+                for value in lines[
+                    start_index:
+                    min(
+                        len(lines),
+                        start_index + 6,
+                    )
+                ]
+            ]
+
+            if (
+                "abluft" not in window_head
+                or "raumfläche" not in window_head
+                or "ep:" not in window_head
+            ):
+                continue
+
+            search_end = min(
+                len(lines),
+                start_index + 14,
+            )
+
+            airflow_values: list[int | None] = []
+            room_name: str | None = None
+            area_m2: float | None = None
+            ep_number: str | None = None
+
+            # Nach dem Kopf folgen zwei Luftmengen, Raumname, Fläche, ep.
+            for index in range(
+                start_index + 1,
+                search_end,
+            ):
+                candidate = lines[
+                    index
+                ].strip()
+
+                airflow_match = airflow_value_re.fullmatch(
+                    candidate
+                )
+
+                if airflow_match and len(
+                    airflow_values
+                ) < 2:
+                    airflow_values.append(
+                        normalize_number(
+                            airflow_match.group(1)
+                        )
+                    )
+                    continue
+
+                area_match = area_re.fullmatch(
+                    candidate
+                )
+
+                if (
+                    area_match
+                    and len(
+                        airflow_values
+                    ) >= 2
+                ):
+                    try:
+                        area_m2 = float(
+                            area_match.group(1).replace(
+                                ",",
+                                ".",
+                            )
+                        )
+                    except ValueError:
+                        area_m2 = None
+
+                    # Die nächste reine Ganzzahl ist die ep-Nummer.
+                    for ep_index in range(
+                        index + 1,
+                        min(
+                            len(lines),
+                            index + 4,
+                        ),
+                    ):
+                        ep_match = pure_int_re.fullmatch(
+                            lines[
+                                ep_index
+                            ].strip()
+                        )
+
+                        if ep_match:
+                            ep_number = ep_match.group(
+                                1
+                            )
+                            break
+
+                    break
+
+                if (
+                    len(
+                        airflow_values
+                    ) >= 2
+                    and room_name is None
+                    and candidate
+                    and candidate.casefold()
+                    not in {
+                        "zuluft",
+                        "abluft",
+                        "anlage",
+                        "raumfläche",
+                        "ep:",
+                    }
+                    and not airflow_value_re.fullmatch(
+                        candidate
+                    )
+                    and not area_re.fullmatch(
+                        candidate
+                    )
+                    and not pure_int_re.fullmatch(
+                        candidate
+                    )
+                ):
+                    room_name = candidate
+
+            if (
+                len(
+                    airflow_values
+                ) < 2
+                or ep_number is None
+            ):
+                continue
+
+            block_index += 1
+
+            rows.append(
+                {
+                    "raumnummer": None,
+                    "raumname": room_name,
+                    "betriebsart": None,
+                    "zul": airflow_values[0],
+                    "abl": airflow_values[1],
+                    "seite": page_number,
+                    "block_index": block_index,
+                    "quelle": "schema",
+                    "ep_nummer": ep_number,
+                    "raumflaeche_m2": area_m2,
+                }
+            )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "raumnummer",
+            "raumname",
+            "betriebsart",
+            "zul",
+            "abl",
+            "seite",
+            "block_index",
+            "quelle",
+            "ep_nummer",
+            "raumflaeche_m2",
+        ],
+    )
+
+
+def map_numeric_schema_by_ep(
+    floorplan_df: pd.DataFrame,
+    schema_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Ordnet Schema-Blöcke über die ep-Nummer dem echten Grundrissraum zu.
+
+    Das ist deutlich robuster als eine Zuordnung über Raumflächen:
+    Grundriss -1.227 hat ep 219 und das Schema ebenfalls ep 219.
+    """
+    if floorplan_df.empty or schema_df.empty:
+        return schema_df.iloc[0:0].copy()
+
+    if (
+        "ep_nummer" not in floorplan_df.columns
+        or "ep_nummer" not in schema_df.columns
+    ):
+        return schema_df.iloc[0:0].copy()
+
+    mapping_source = (
+        floorplan_df[
+            [
+                "raumnummer",
+                "ep_nummer",
+            ]
+        ]
+        .dropna(
+            subset=[
+                "raumnummer",
+                "ep_nummer",
+            ]
+        )
+        .drop_duplicates()
+    )
+
+    # Nur eindeutige ep -> Raumnummer-Zuordnungen verwenden.
+    ep_counts = (
+        mapping_source.groupby(
+            "ep_nummer"
+        )[
+            "raumnummer"
+        ]
+        .nunique()
+    )
+
+    unique_eps = set(
+        ep_counts[
+            ep_counts == 1
+        ].index.astype(
+            str
+        )
+    )
+
+    mapping_source = mapping_source.loc[
+        mapping_source[
+            "ep_nummer"
+        ].astype(
+            str
+        ).isin(
+            unique_eps
+        )
+    ].copy()
+
+    ep_to_room = {
+        str(
+            row.ep_nummer
+        ): row.raumnummer
+        for row in mapping_source.itertuples(
+            index=False
+        )
+    }
+
+    result = schema_df.copy()
+
+    result[
+        "raumnummer"
+    ] = result[
+        "ep_nummer"
+    ].astype(
+        str
+    ).map(
+        ep_to_room
+    )
+
+    return (
+        result.dropna(
+            subset=[
+                "raumnummer"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
 
 def extract_rooms_from_pages(
     page_lines: dict[int, list[str]],
