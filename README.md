@@ -148,17 +148,6 @@ Programm starten:
 ```powershell
 python luftmengen_vergleich.py
 ```
----
-## Windows-EXE
-Das gesamte Tool kann als einzelne Windows-Anwendung erstellt werden:
-```powershell
-python -m PyInstaller --clean --onefile --windowed --name Planvergleich --add-data "assets;assets" luftmengen_vergleich.py
-```
-Die fertige Datei befindet sich anschliessend unter:
-```text
-dist/Planvergleich.exe
-```
----
 ## Hinweis
 Das Tool unterstützt die technische Planprüfung und soll repetitive manuelle Kontrollen reduzieren.
 Automatisch erkannte Abweichungen und nicht eindeutige Fälle sollten weiterhin anhand der Originalunterlagen fachlich kontrolliert werden.
