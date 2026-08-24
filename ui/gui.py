@@ -22,12 +22,13 @@ from hk.lastvergleich import (
     extract_loads_from_pdfs_checked,
 )
 from hk.lastvergleich_excel import export_load_comparison_excel
+from luft.nummernkontrolle import run_luft_number_check
 from luftmengen_vergleich import run_comparison
 
 
 CUSTOM_PATTERN_LABEL = "Benutzerdefiniertes Muster"
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 BACKGROUND_COLOR = "#F3F6F8"
 CARD_COLOR = "#FFFFFF"
@@ -73,6 +74,10 @@ class LuftmengenGUI:
         self.schema_pdfs: list[Path] = []
         self.output_dir: Path | None = None
 
+        # Lüftung Schemanummernkontrolle
+        self.luft_num_pairs: list[dict[str, str]] = []
+        self.luft_num_output_dir: Path | None = None
+
         # HK Nummernkontrolle
         self.hk_pairs: list[dict[str, str]] = []
         self.hk_output_dir: Path | None = None
@@ -102,6 +107,7 @@ class LuftmengenGUI:
         self.logo_image: ImageTk.PhotoImage | None = None
 
         self.lueftung_widgets: list[tk.Widget] = []
+        self.luft_num_widgets: list[tk.Widget] = []
         self.hk_widgets: list[tk.Widget] = []
         self.hk_load_widgets: list[tk.Widget] = []
 
@@ -207,6 +213,7 @@ class LuftmengenGUI:
         )
 
         self.create_lueftung_area()
+        self.create_luft_num_area()
         self.create_hk_area()
         self.create_hk_load_area()
 
@@ -344,7 +351,7 @@ class LuftmengenGUI:
         tk.Label(
             parent,
             text="Energie und Planung",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
         ).pack(
@@ -372,6 +379,17 @@ class LuftmengenGUI:
         )
 
         self.lueftung_button.pack(
+            side="left",
+            padx=(0, 10),
+        )
+
+        self.luft_num_button = self.create_module_button(
+            selector,
+            "Lüftung – Schemanummernkontrolle",
+            self.show_luft_num_module,
+        )
+
+        self.luft_num_button.pack(
             side="left",
             padx=(0, 10),
         )
@@ -414,7 +432,7 @@ class LuftmengenGUI:
             relief="flat",
             cursor="hand2",
             command=command,
-            padx=18,
+            padx=12,
             pady=10,
         )
 
@@ -424,6 +442,7 @@ class LuftmengenGUI:
     ) -> None:
         buttons = {
             "lueftung": self.lueftung_button,
+            "luft_num": self.luft_num_button,
             "hk": self.hk_button,
             "hk_load": self.hk_load_button,
         }
@@ -503,6 +522,7 @@ class LuftmengenGUI:
             "lueftung"
         )
 
+        self.luft_num_frame.pack_forget()
         self.hk_frame.pack_forget()
         self.hk_load_frame.pack_forget()
 
@@ -515,12 +535,31 @@ class LuftmengenGUI:
             "lueftung"
         )
 
+    def show_luft_num_module(self) -> None:
+        self.active_module.set(
+            "luft_num"
+        )
+
+        self.lueftung_frame.pack_forget()
+        self.hk_frame.pack_forget()
+        self.hk_load_frame.pack_forget()
+
+        self.luft_num_frame.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.set_module_button_states(
+            "luft_num"
+        )
+
     def show_hk_module(self) -> None:
         self.active_module.set(
             "hk"
         )
 
         self.lueftung_frame.pack_forget()
+        self.luft_num_frame.pack_forget()
         self.hk_load_frame.pack_forget()
 
         self.hk_frame.pack(
@@ -538,6 +577,7 @@ class LuftmengenGUI:
         )
 
         self.lueftung_frame.pack_forget()
+        self.luft_num_frame.pack_forget()
         self.hk_frame.pack_forget()
 
         self.hk_load_frame.pack(
@@ -949,6 +989,223 @@ class LuftmengenGUI:
         )
 
         self.status.pack()
+
+    # ========================================================
+    # LÜFTUNG SCHEMANUMMERNKONTROLLE – GUI
+    # ========================================================
+
+    def create_luft_num_area(self) -> None:
+        self.luft_num_frame = tk.Frame(
+            self.module_area,
+            bg=BACKGROUND_COLOR,
+        )
+
+        self.create_luft_num_info_card(
+            self.luft_num_frame
+        )
+        self.create_luft_num_pairs_card(
+            self.luft_num_frame
+        )
+        self.create_luft_num_output_card(
+            self.luft_num_frame
+        )
+        self.create_luft_num_action_area(
+            self.luft_num_frame
+        )
+
+    def create_luft_num_info_card(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        frame = self.create_card(
+            parent,
+            "Lüftung – Schemanummernkontrolle Schema/BML",
+        )
+
+        tk.Label(
+            frame,
+            text=(
+                "Dieses Modul vergleicht die hellblauen und dunkelblauen "
+                "Lüftungs-Schemanummern (z. B. L1 1.12 oder L13 4.10) "
+                "aus einem Prinzipschema mit der Spalte «ep_Schemanummer» "
+                "aus der dazugehörigen Betriebsmittelliste."
+            ),
+            font=("Segoe UI", 10),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            justify="left",
+            wraplength=900,
+            anchor="w",
+        ).pack(
+            fill="x"
+        )
+
+    def create_luft_num_pairs_card(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        frame = self.create_card(
+            parent,
+            "1. Schema/BML-Paare auswählen",
+        )
+
+        button_frame = tk.Frame(
+            frame,
+            bg=CARD_COLOR,
+        )
+
+        button_frame.pack(
+            fill="x",
+        )
+
+        add_button = self.create_secondary_button(
+            button_frame,
+            "Paar hinzufügen",
+            self.add_luft_num_pair,
+        )
+
+        add_button.pack(
+            side="left",
+            padx=(0, 8),
+        )
+
+        clear_button = self.create_light_button(
+            button_frame,
+            "Paarliste leeren",
+            self.clear_luft_num_pairs,
+        )
+
+        clear_button.pack(
+            side="left",
+        )
+
+        self.luft_num_widgets.extend(
+            [
+                add_button,
+                clear_button,
+            ]
+        )
+
+        self.luft_num_pairs_label = tk.Label(
+            frame,
+            text="Keine Paare ausgewählt",
+            font=("Segoe UI", 9),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            justify="left",
+            anchor="w",
+            wraplength=900,
+        )
+
+        self.luft_num_pairs_label.pack(
+            fill="x",
+            pady=(12, 0),
+        )
+
+    def create_luft_num_output_card(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        frame = self.create_card(
+            parent,
+            "2. Ausgabe",
+        )
+
+        frame.columnconfigure(
+            1,
+            weight=1,
+        )
+
+        output_button = self.create_secondary_button(
+            frame,
+            "Ausgabeordner auswählen",
+            self.choose_luft_num_output,
+        )
+
+        output_button.grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 15),
+            pady=4,
+        )
+
+        self.luft_num_widgets.append(
+            output_button
+        )
+
+        self.luft_num_output_label = tk.Label(
+            frame,
+            text="Kein Ausgabeordner ausgewählt",
+            font=("Segoe UI", 9),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            anchor="w",
+            justify="left",
+            wraplength=650,
+        )
+
+        self.luft_num_output_label.grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+
+    def create_luft_num_action_area(
+        self,
+        parent: tk.Widget,
+    ) -> None:
+        action_frame = tk.Frame(
+            parent,
+            bg=BACKGROUND_COLOR,
+        )
+
+        action_frame.pack(
+            fill="x",
+            pady=(15, 5),
+        )
+
+        self.luft_num_start_button = tk.Button(
+            action_frame,
+            text="Lüftungs-Schemanummernkontrolle starten",
+            font=("Segoe UI", 12, "bold"),
+            fg="white",
+            bg=PRIMARY_COLOR,
+            activeforeground="white",
+            activebackground=PRIMARY_HOVER_COLOR,
+            relief="flat",
+            cursor="hand2",
+            command=self.start_luft_num,
+            padx=35,
+            pady=12,
+        )
+
+        self.luft_num_start_button.pack()
+
+        self.luft_num_progress = ttk.Progressbar(
+            action_frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=1,
+            value=0,
+            length=600,
+            style="Comparison.Horizontal.TProgressbar",
+        )
+
+        self.luft_num_progress.pack(
+            pady=(18, 8)
+        )
+
+        self.luft_num_status = tk.Label(
+            action_frame,
+            text="Bereit",
+            font=("Segoe UI", 10),
+            fg=MUTED_TEXT_COLOR,
+            bg=BACKGROUND_COLOR,
+            wraplength=760,
+        )
+
+        self.luft_num_status.pack()
 
     # ========================================================
     # HK NUMMERNKONTROLLE – GUI
@@ -2154,6 +2411,341 @@ class LuftmengenGUI:
     # ========================================================
     # HK NUMMERNKONTROLLE – LOGIK
     # ========================================================
+
+    # ========================================================
+    # LÜFTUNG SCHEMANUMMERNKONTROLLE – DATEIAUSWAHL / START
+    # ========================================================
+
+    def add_luft_num_pair(self) -> None:
+        schema_pdf = filedialog.askopenfilename(
+            title="Lüftungs-Prinzipschema auswählen",
+            filetypes=[
+                (
+                    "PDF-Dateien",
+                    "*.pdf",
+                ),
+            ],
+        )
+
+        if not schema_pdf:
+            return
+
+        bml_excel = filedialog.askopenfilename(
+            title="Lüftungs-Betriebsmittelliste auswählen",
+            filetypes=[
+                (
+                    "Excel-Dateien",
+                    "*.xlsx *.xlsm",
+                ),
+            ],
+        )
+
+        if not bml_excel:
+            return
+
+        pair_number = len(
+            self.luft_num_pairs
+        ) + 1
+
+        schema_stem = Path(
+            schema_pdf
+        ).stem
+
+        default_name = re.sub(
+            r'[<>:"/\\|?*]+',
+            "_",
+            schema_stem,
+        )
+
+        pair_name = simpledialog.askstring(
+            title=f"Paar {pair_number}: Name",
+            prompt=(
+                "Wie soll diese Auswertung heissen?\n\n"
+                "Beispiele:\n"
+                "- Gastro\n"
+                "- Pflege\n"
+                "- Lüftung_MIT1"
+            ),
+            initialvalue=default_name,
+        )
+
+        if pair_name is None or not pair_name.strip():
+            pair_name = default_name
+
+        self.luft_num_pairs.append(
+            {
+                "name": pair_name.strip(),
+                "schema_pdf": schema_pdf,
+                "bml_excel": bml_excel,
+            }
+        )
+
+        self.update_luft_num_pairs_label()
+
+    def clear_luft_num_pairs(self) -> None:
+        self.luft_num_pairs.clear()
+        self.update_luft_num_pairs_label()
+
+    def update_luft_num_pairs_label(self) -> None:
+        if not self.luft_num_pairs:
+            text = "Keine Paare ausgewählt"
+        else:
+            lines = [
+                (
+                    f"{index}. {pair['name']} "
+                    f"({Path(pair['schema_pdf']).name} / "
+                    f"{Path(pair['bml_excel']).name})"
+                )
+                for index, pair
+                in enumerate(
+                    self.luft_num_pairs,
+                    start=1,
+                )
+            ]
+
+            text = "\n".join(
+                lines
+            )
+
+        self.luft_num_pairs_label.config(
+            text=text
+        )
+
+    def choose_luft_num_output(self) -> None:
+        initial_directory: str | None = None
+
+        if self.luft_num_output_dir is not None:
+            initial_directory = str(
+                self.luft_num_output_dir
+            )
+
+        dialog_arguments: dict[str, object] = {
+            "title": "Ausgabeordner auswählen",
+        }
+
+        if initial_directory is not None:
+            dialog_arguments[
+                "initialdir"
+            ] = initial_directory
+
+        folder = filedialog.askdirectory(
+            **dialog_arguments
+        )
+
+        if folder:
+            self.luft_num_output_dir = Path(
+                folder
+            )
+
+            self.luft_num_output_label.config(
+                text=str(
+                    self.luft_num_output_dir
+                )
+            )
+
+    def validate_luft_num_inputs(self) -> None:
+        if not self.luft_num_pairs:
+            raise ValueError(
+                "Bitte mindestens ein Lüftungs-Schema/BML-Paar hinzufügen."
+            )
+
+        if self.luft_num_output_dir is None:
+            raise ValueError(
+                "Bitte einen Ausgabeordner auswählen."
+            )
+
+    def set_luft_num_running_state(
+        self,
+        running: bool,
+    ) -> None:
+        widget_state = (
+            "disabled"
+            if running
+            else "normal"
+        )
+
+        for widget in self.luft_num_widgets:
+            try:
+                widget.config(
+                    state=widget_state
+                )
+            except tk.TclError:
+                pass
+
+        self.luft_num_start_button.config(
+            state=(
+                "disabled"
+                if running
+                else "normal"
+            ),
+            text=(
+                "Lüftungs-Kontrolle läuft …"
+                if running
+                else "Lüftungs-Schemanummernkontrolle starten"
+            ),
+        )
+
+    def start_luft_num(self) -> None:
+        try:
+            self.validate_luft_num_inputs()
+
+        except Exception as error:
+            messagebox.showerror(
+                "Eingabe prüfen",
+                str(error),
+            )
+            return
+
+        self.luft_num_progress.config(
+            maximum=max(
+                len(self.luft_num_pairs),
+                1,
+            ),
+            value=0,
+        )
+
+        self.luft_num_status.config(
+            text=(
+                "Lüftungs-Schemanummernkontrolle "
+                "wird vorbereitet …"
+            ),
+            fg=MUTED_TEXT_COLOR,
+        )
+
+        self.set_luft_num_running_state(
+            True
+        )
+
+        worker = threading.Thread(
+            target=self.run_luft_num_worker,
+            daemon=True,
+        )
+
+        worker.start()
+
+    def run_luft_num_worker(self) -> None:
+        try:
+            output_paths: list[Path] = []
+
+            for index, pair in enumerate(
+                self.luft_num_pairs,
+                start=1,
+            ):
+                self.root.after(
+                    0,
+                    self.update_luft_num_progress,
+                    index - 1,
+                    (
+                        f"{index}/{len(self.luft_num_pairs)} "
+                        f"wird verarbeitet: {pair['name']}"
+                    ),
+                )
+
+                output_path = run_luft_number_check(
+                    schema_pdf=pair[
+                        "schema_pdf"
+                    ],
+                    bml_excel=pair[
+                        "bml_excel"
+                    ],
+                    output_dir=(
+                        self.luft_num_output_dir
+                    ),
+                    name=(
+                        "Lueftung_"
+                        "Schemanummernkontrolle_"
+                        f"{index}_{pair['name']}"
+                    ),
+                )
+
+                output_paths.append(
+                    output_path
+                )
+
+            self.root.after(
+                0,
+                self.handle_luft_num_success,
+                output_paths,
+            )
+
+        except Exception as error:
+            self.root.after(
+                0,
+                self.handle_luft_num_error,
+                error,
+            )
+
+    def update_luft_num_progress(
+        self,
+        value: int,
+        message: str,
+    ) -> None:
+        self.luft_num_progress.config(
+            value=value
+        )
+
+        self.luft_num_status.config(
+            text=message,
+            fg=MUTED_TEXT_COLOR,
+        )
+
+    def handle_luft_num_success(
+        self,
+        output_paths: list[Path],
+    ) -> None:
+        self.luft_num_progress.config(
+            value=len(
+                output_paths
+            )
+        )
+
+        self.luft_num_status.config(
+            text=(
+                "Lüftungs-Schemanummernkontrolle "
+                "erfolgreich abgeschlossen."
+            ),
+            fg=SUCCESS_COLOR,
+        )
+
+        self.set_luft_num_running_state(
+            False
+        )
+
+        result_text = "\n".join(
+            str(path)
+            for path in output_paths
+        )
+
+        messagebox.showinfo(
+            "Lüftungs-Schemanummernkontrolle abgeschlossen",
+            (
+                "Die Lüftungs-Schemanummernkontrolle "
+                "wurde erfolgreich abgeschlossen.\n\n"
+                f"Erstellte Dateien: {len(output_paths)}\n\n"
+                f"{result_text}"
+            ),
+        )
+
+    def handle_luft_num_error(
+        self,
+        error: Exception,
+    ) -> None:
+        self.luft_num_status.config(
+            text=(
+                "Bei der Lüftungs-Schemanummernkontrolle "
+                "ist ein Fehler aufgetreten."
+            ),
+            fg=ERROR_COLOR,
+        )
+
+        self.set_luft_num_running_state(
+            False
+        )
+
+        messagebox.showerror(
+            "Fehler",
+            str(error),
+        )
 
     def add_hk_pair(self) -> None:
         pair_number = len(

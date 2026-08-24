@@ -7,9 +7,10 @@ from pathlib import Path
 
 import fitz
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 # ============================================================
@@ -766,37 +767,65 @@ def export_result(
 ) -> None:
     """
     Exportiert den Vergleich als Excel-Datei.
+
+    Die Arbeitsmappe wird direkt mit openpyxl aufgebaut.
+    Dadurch existiert zu jedem Zeitpunkt mindestens ein sichtbares
+    Tabellenblatt. Das verhindert insbesondere in der gepackten EXE
+    den openpyxl-Fehler "At least one sheet must be visible", der bei
+    pandas.ExcelWriter eine ursprünglichere Export-Fehlermeldung
+    überdecken kann.
     """
-    output_path = Path(
-        output_path
+    output_path = Path(output_path)
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    with pd.ExcelWriter(
-        output_path,
-        engine="openpyxl",
-    ) as writer:
-        comparison_df.to_excel(
-            writer,
-            sheet_name="Vergleich",
-            index=False,
-        )
+    workbook = Workbook()
 
-        schema_df.to_excel(
-            writer,
-            sheet_name="Nummern_Schema",
-            index=False,
-        )
+    # Das von openpyxl automatisch angelegte sichtbare Blatt wird
+    # direkt als erstes Ergebnisblatt verwendet.
+    first_sheet = workbook.active
+    first_sheet.title = "Vergleich"
 
-        excel_df.to_excel(
-            writer,
-            sheet_name="Nummern_Excel",
+    sheets = [
+        ("Vergleich", comparison_df),
+        ("Nummern_Schema", schema_df),
+        ("Nummern_Excel", excel_df),
+    ]
+
+    for index, (sheet_name, dataframe) in enumerate(sheets):
+        if index == 0:
+            worksheet = first_sheet
+        else:
+            worksheet = workbook.create_sheet(
+                title=sheet_name
+            )
+
+        # Auch leere DataFrames erhalten mindestens die Kopfzeile.
+        for row in dataframe_to_rows(
+            dataframe,
             index=False,
-        )
+            header=True,
+        ):
+            worksheet.append(
+                list(row)
+            )
+
+        # Falls ein DataFrame ausnahmsweise gar keine Spalten hat,
+        # bleibt trotzdem ein sichtbares Blatt bestehen.
+        if worksheet.max_row == 1 and worksheet.max_column == 1:
+            if worksheet["A1"].value is None:
+                worksheet["A1"] = "Keine Daten"
+
+    workbook.save(
+        output_path
+    )
+    workbook.close()
 
     format_excel_output(
         output_path
     )
-
 
 def format_excel_output(
     output_path: str | Path,
