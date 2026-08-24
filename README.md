@@ -138,16 +138,7 @@ Die Excel-Auswertung enthält unter anderem:
 - Dateiprüfung
 - Nicht geprüft
 Dadurch bleibt nachvollziehbar, welche Dateien verarbeitet wurden, welche Lasten übereinstimmen und welche Einträge noch manuell kontrolliert werden müssen.
----
-## Start
-Abhängigkeiten installieren:
-```powershell
-pip install -r requirements.txt
-```
-Programm starten:
-```powershell
-python luftmengen_vergleich.py
-```
+
 ## Hinweis
 Das Tool unterstützt die technische Planprüfung und soll repetitive manuelle Kontrollen reduzieren.
 Automatisch erkannte Abweichungen und nicht eindeutige Fälle sollten weiterhin anhand der Originalunterlagen fachlich kontrolliert werden.
