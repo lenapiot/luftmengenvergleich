@@ -1,6 +1,8 @@
 from __future__ import annotations
+import traceback
 
 import getpass
+import inspect
 import re
 import threading
 from datetime import datetime
@@ -19,6 +21,8 @@ from hk.lastvergleich import (
     compare_loads_with_schema,
     determine_document_building,
     extract_and_consolidate_schema,
+    extract_loads_from_excel_checked,
+    extract_loads_from_excels_checked,
     extract_loads_from_pdfs_checked,
 )
 from hk.lastvergleich_excel import export_load_comparison_excel
@@ -58,8 +62,11 @@ class LuftmengenGUI:
             f"Planvergleich – Version {APP_VERSION}"
         )
 
-        self.root.geometry("1200x1100")
-        self.root.minsize(980, 820)
+        # Etwas grösser als bisher, aber bewusst NICHT maximiert.
+        # So bleibt das Programm ein normales Fenster und der Startbutton
+        # des Lastvergleichs ist trotzdem direkt sichtbar.
+        self.root.geometry("1280x1150")
+        self.root.minsize(1050, 760)
 
         self.root.configure(
             bg=BACKGROUND_COLOR
@@ -83,7 +90,10 @@ class LuftmengenGUI:
         self.hk_output_dir: Path | None = None
 
         # HK Lastvergleich
-        self.hk_load_schema_pdf: Path | None = None
+        self.hk_load_schema_pdfs: list[Path] = []
+        self.hk_load_source_type = tk.StringVar(value="pdf")
+        self.hk_load_scope = tk.StringVar(value="beides")
+        self.hk_load_excel_paths: list[Path] = []
         self.hk_heating_pdfs: list[Path] = []
         self.hk_cooling_pdfs: list[Path] = []
         self.hk_load_output_dir: Path | None = None
@@ -1446,20 +1456,22 @@ class LuftmengenGUI:
             self.hk_load_frame
         )
 
+
     def create_hk_load_info_card(
         self,
         parent: tk.Widget,
     ) -> None:
         frame = self.create_card(
             parent,
-            "Heizung/Kälte – Lastvergleich Grundriss/Strangschema",
+            "Heizung/Kälte – Lastvergleich",
         )
 
         tk.Label(
             frame,
             text=(
-                "Verglichen werden Heiz- und Kühllasten der Grundrisse "
-                "mit Q_H und Q_K aus dem Strangschema."
+                "Ein oder mehrere Strangschemata werden jeweils einzeln mit den "
+                "vorhandenen Heiz- und/oder Kühllasten verglichen. Als Lastquelle "
+                "können PDF-Grundrisse oder eine gemeinsame Excel-Datei verwendet werden."
             ),
             font=("Segoe UI", 10),
             fg=TEXT_COLOR,
@@ -1467,17 +1479,14 @@ class LuftmengenGUI:
             justify="left",
             wraplength=900,
             anchor="w",
-        ).pack(
-            fill="x"
-        )
+        ).pack(fill="x")
 
         tk.Label(
             frame,
             text=(
-                "WICHTIG: Es werden nur die Ebenen geprüft, für die "
-                "Heizlast- oder Kühllast-Grundrisse ausgewählt wurden. "
-                "Andere Ebenen des Strangschemas gelten in diesem Lauf "
-                "ausdrücklich als nicht geprüft und werden nicht als Fehler gewertet."
+                "Gebäudelogik: MIT1-Schemata werden nur mit MIT1-Räumen verglichen, "
+                "MIT2-Schemata nur mit MIT2-Räumen. Ein echtes MIT12-Schema verwendet "
+                "MIT1 und MIT2. Räume werden nicht aufgrund ihrer Ebene ausgeschlossen."
             ),
             font=("Segoe UI", 9, "bold"),
             fg=WARNING_COLOR,
@@ -1487,16 +1496,13 @@ class LuftmengenGUI:
             anchor="w",
             padx=12,
             pady=10,
-        ).pack(
-            fill="x",
-            pady=(12, 0),
-        )
+        ).pack(fill="x", pady=(12, 0))
 
         tk.Label(
             frame,
             text=(
-                "Sonderregel: Heizlast -1 W = 0 W + geprüft; "
-                "Kühllast +1 W = 0 W + geprüft."
+                "PDF-Sonderregel: Heizlast -1 W = 0 W + geprüft; "
+                "Kühllast +1 W = 0 W + geprüft. Bei Excel ist 0 W ein echter 0-W-Wert."
             ),
             font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
@@ -1504,10 +1510,9 @@ class LuftmengenGUI:
             justify="left",
             wraplength=900,
             anchor="w",
-        ).pack(
-            fill="x",
-            pady=(10, 0),
-        )
+        ).pack(fill="x", pady=(10, 0))
+
+
 
     def create_hk_load_files_card(
         self,
@@ -1515,42 +1520,42 @@ class LuftmengenGUI:
     ) -> None:
         frame = self.create_card(
             parent,
-            "1. Dateien auswählen",
+            "1. Dateien und Prüfumfang",
         )
 
-        frame.columnconfigure(
-            1,
-            weight=1,
-        )
+        frame.columnconfigure(1, weight=1)
 
-        # Strangschema
+        # ----------------------------------------------------
+        # STRANGSCHEMATA
+        # ----------------------------------------------------
         tk.Label(
             frame,
-            text="Strangschema:",
+            text="Strangschemata:",
             font=("Segoe UI", 10, "bold"),
             fg=TEXT_COLOR,
             bg=CARD_COLOR,
             width=20,
             anchor="w",
-        ).grid(
-            row=0,
-            column=0,
-            sticky="w",
-            pady=5,
-        )
+        ).grid(row=0, column=0, sticky="w", pady=4)
 
-        schema_button = self.create_secondary_button(
+        schema_folder = self.create_secondary_button(
             frame,
-            "PDF auswählen",
-            self.choose_hk_load_schema,
+            "Ordner hinzufügen (empfohlen)",
+            self.choose_hk_load_schema_folder,
+        )
+        schema_folder.grid(
+            row=0, column=1, sticky="w",
+            padx=(12, 8), pady=4
         )
 
-        schema_button.grid(
-            row=0,
-            column=1,
-            sticky="w",
-            padx=(12, 8),
-            pady=5,
+        schema_files = self.create_light_button(
+            frame,
+            "Einzelne PDFs hinzufügen",
+            self.choose_hk_load_schemas,
+        )
+        schema_files.grid(
+            row=0, column=2, sticky="w",
+            padx=(0, 8), pady=4
         )
 
         schema_clear = self.create_light_button(
@@ -1558,24 +1563,17 @@ class LuftmengenGUI:
             "Auswahl leeren",
             self.clear_hk_load_schema,
         )
-
         schema_clear.grid(
-            row=0,
-            column=2,
-            sticky="w",
-            pady=5,
+            row=0, column=3, sticky="w", pady=4
         )
 
         self.hk_load_widgets.extend(
-            [
-                schema_button,
-                schema_clear,
-            ]
+            [schema_folder, schema_files, schema_clear]
         )
 
         self.hk_load_schema_label = tk.Label(
             frame,
-            text="Kein Strangschema ausgewählt",
+            text="Keine Strangschemata ausgewählt",
             font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
             bg=CARD_COLOR,
@@ -1583,20 +1581,210 @@ class LuftmengenGUI:
             justify="left",
             wraplength=720,
         )
-
         self.hk_load_schema_label.grid(
-            row=1,
-            column=1,
-            columnspan=2,
-            sticky="w",
-            padx=(12, 0),
-            pady=(0, 10),
+            row=1, column=1, columnspan=3,
+            sticky="w", padx=(12, 0), pady=(0, 6)
         )
 
-        # Heizlast
+        # ----------------------------------------------------
+        # LASTQUELLE + PRÜFUMFANG
+        # ----------------------------------------------------
+        tk.Label(
+            frame,
+            text="Lastquelle:",
+            font=("Segoe UI", 10, "bold"),
+            fg=TEXT_COLOR,
+            bg=CARD_COLOR,
+            width=20,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="w", pady=4)
+
+        source_frame = tk.Frame(frame, bg=CARD_COLOR)
+        source_frame.grid(
+            row=2, column=1, columnspan=3,
+            sticky="w", padx=(12, 0), pady=4
+        )
+
+        self.hk_source_pdf_radio = tk.Radiobutton(
+            source_frame,
+            text="PDF-Grundrisse",
+            variable=self.hk_load_source_type,
+            value="pdf",
+            command=self.update_hk_load_source_controls,
+            bg=CARD_COLOR,
+            fg=TEXT_COLOR,
+            activebackground=CARD_COLOR,
+            font=("Segoe UI", 9),
+        )
+        self.hk_source_pdf_radio.pack(
+            side="left", padx=(0, 18)
+        )
+
+        self.hk_source_excel_radio = tk.Radiobutton(
+            source_frame,
+            text="Excel",
+            variable=self.hk_load_source_type,
+            value="excel",
+            command=self.update_hk_load_source_controls,
+            bg=CARD_COLOR,
+            fg=TEXT_COLOR,
+            activebackground=CARD_COLOR,
+            font=("Segoe UI", 9),
+        )
+        self.hk_source_excel_radio.pack(side="left")
+
+        self.hk_load_widgets.extend(
+            [self.hk_source_pdf_radio, self.hk_source_excel_radio]
+        )
+
+        tk.Label(
+            frame,
+            text="Prüfumfang:",
+            font=("Segoe UI", 10, "bold"),
+            fg=TEXT_COLOR,
+            bg=CARD_COLOR,
+            width=20,
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=4)
+
+        scope_frame = tk.Frame(frame, bg=CARD_COLOR)
+        scope_frame.grid(
+            row=3, column=1, columnspan=3,
+            sticky="w", padx=(12, 0), pady=4
+        )
+
+        self.hk_scope_radios = []
+        for label, value in (
+            ("Heiz- und Kühllast", "beides"),
+            ("Nur Heizlast", "heizung"),
+            ("Nur Kühllast", "kuehlung"),
+        ):
+            radio = tk.Radiobutton(
+                scope_frame,
+                text=label,
+                variable=self.hk_load_scope,
+                value=value,
+                command=self.update_hk_load_source_controls,
+                bg=CARD_COLOR,
+                fg=TEXT_COLOR,
+                activebackground=CARD_COLOR,
+                font=("Segoe UI", 9),
+            )
+            radio.pack(
+                side="left", padx=(0, 18)
+            )
+            self.hk_scope_radios.append(radio)
+            self.hk_load_widgets.append(radio)
+
+        # ----------------------------------------------------
+        # EXCEL-BEREICH
+        # Nur sichtbar, wenn Excel gewählt ist.
+        # ----------------------------------------------------
+        self.hk_excel_source_frame = tk.Frame(
+            frame,
+            bg=CARD_COLOR,
+        )
+        self.hk_excel_source_frame.grid(
+            row=4,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            pady=(3, 0),
+        )
+        self.hk_excel_source_frame.columnconfigure(
+            1,
+            weight=1,
+        )
+
+        tk.Label(
+            self.hk_excel_source_frame,
+            text="Excel-Dateien:",
+            font=("Segoe UI", 10, "bold"),
+            fg=TEXT_COLOR,
+            bg=CARD_COLOR,
+            width=20,
+            anchor="w",
+        ).grid(
+            row=0, column=0,
+            sticky="w", pady=4
+        )
+
+        self.hk_excel_button = self.create_secondary_button(
+            self.hk_excel_source_frame,
+            "Excel-Dateien hinzufügen",
+            self.choose_hk_load_excel,
+        )
+        self.hk_excel_button.grid(
+            row=0, column=1,
+            sticky="w", padx=(12, 8), pady=4
+        )
+
+        self.hk_excel_folder_button = self.create_light_button(
+            self.hk_excel_source_frame,
+            "Ordner hinzufügen",
+            self.choose_hk_load_excel_folder,
+        )
+        self.hk_excel_folder_button.grid(
+            row=0, column=2,
+            sticky="w", padx=(0, 8), pady=4
+        )
+
+        self.hk_excel_clear_button = self.create_light_button(
+            self.hk_excel_source_frame,
+            "Auswahl leeren",
+            self.clear_hk_load_excel,
+        )
+        self.hk_excel_clear_button.grid(
+            row=0, column=3,
+            sticky="w", pady=4
+        )
+
+        self.hk_load_widgets.extend(
+            [
+                self.hk_excel_button,
+                self.hk_excel_folder_button,
+                self.hk_excel_clear_button,
+            ]
+        )
+
+        self.hk_excel_label = tk.Label(
+            self.hk_excel_source_frame,
+            text="Keine Excel-Dateien ausgewählt",
+            font=("Segoe UI", 9),
+            fg=MUTED_TEXT_COLOR,
+            bg=CARD_COLOR,
+            anchor="w",
+            justify="left",
+            wraplength=720,
+        )
+        self.hk_excel_label.grid(
+            row=1, column=1, columnspan=3,
+            sticky="w", padx=(12, 0), pady=(0, 4)
+        )
+
+        # ----------------------------------------------------
+        # PDF-BEREICH
+        # Nur sichtbar, wenn PDF gewählt ist.
+        # ----------------------------------------------------
+        self.hk_pdf_source_frame = tk.Frame(
+            frame,
+            bg=CARD_COLOR,
+        )
+        self.hk_pdf_source_frame.grid(
+            row=4,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            pady=(3, 0),
+        )
+        self.hk_pdf_source_frame.columnconfigure(
+            1,
+            weight=1,
+        )
+
         self.create_hk_load_multirow(
-            frame=frame,
-            row=2,
+            frame=self.hk_pdf_source_frame,
+            row=0,
             title="Heizlast-Grundrisse",
             add_files_command=self.choose_hk_heating_pdfs,
             add_folder_command=self.choose_hk_heating_folder,
@@ -1604,7 +1792,7 @@ class LuftmengenGUI:
         )
 
         self.hk_heating_label = tk.Label(
-            frame,
+            self.hk_pdf_source_frame,
             text="Keine Heizlast-Grundrisse ausgewählt",
             font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
@@ -1613,20 +1801,14 @@ class LuftmengenGUI:
             justify="left",
             wraplength=720,
         )
-
         self.hk_heating_label.grid(
-            row=3,
-            column=1,
-            columnspan=3,
-            sticky="w",
-            padx=(12, 0),
-            pady=(0, 10),
+            row=1, column=1, columnspan=3,
+            sticky="w", padx=(12, 0), pady=(0, 5)
         )
 
-        # Kühllast
         self.create_hk_load_multirow(
-            frame=frame,
-            row=4,
+            frame=self.hk_pdf_source_frame,
+            row=2,
             title="Kühllast-Grundrisse",
             add_files_command=self.choose_hk_cooling_pdfs,
             add_folder_command=self.choose_hk_cooling_folder,
@@ -1634,7 +1816,7 @@ class LuftmengenGUI:
         )
 
         self.hk_cooling_label = tk.Label(
-            frame,
+            self.hk_pdf_source_frame,
             text="Keine Kühllast-Grundrisse ausgewählt",
             font=("Segoe UI", 9),
             fg=MUTED_TEXT_COLOR,
@@ -1643,22 +1825,16 @@ class LuftmengenGUI:
             justify="left",
             wraplength=720,
         )
-
         self.hk_cooling_label.grid(
-            row=5,
-            column=1,
-            columnspan=3,
-            sticky="w",
-            padx=(12, 0),
+            row=3, column=1, columnspan=3,
+            sticky="w", padx=(12, 0), pady=(0, 3)
         )
 
-        tk.Label(
-            frame,
+        self.hk_pdf_hint_label = tk.Label(
+            self.hk_pdf_source_frame,
             text=(
-                "Empfohlen: «Ordner hinzufügen» verwenden. Dadurch wird nur ein "
-                "Ordnerdialog geöffnet und alle PDFs im gewählten Ordner werden "
-                "übernommen. Das vermeidet Probleme mit der Windows/Adobe-PDF-Vorschau. "
-                "«Einzelne PDFs hinzufügen» bleibt als Alternative verfügbar."
+                "Empfohlen: Ordner hinzufügen. So wird die "
+                "Windows/Adobe-PDF-Vorschau bei vielen Dateien umgangen."
             ),
             font=("Segoe UI", 8),
             fg=MUTED_TEXT_COLOR,
@@ -1666,13 +1842,13 @@ class LuftmengenGUI:
             justify="left",
             wraplength=850,
             anchor="w",
-        ).grid(
-            row=6,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(12, 0),
         )
+        self.hk_pdf_hint_label.grid(
+            row=4, column=0, columnspan=4,
+            sticky="w", pady=(7, 0)
+        )
+
+        self.update_hk_load_source_controls()
 
     def create_hk_load_multirow(
         self,
@@ -1746,6 +1922,15 @@ class LuftmengenGUI:
                 clear_button,
             ]
         )
+
+        if not hasattr(self, "hk_pdf_control_groups"):
+            self.hk_pdf_control_groups = {}
+
+        self.hk_pdf_control_groups[title] = [
+            add_folder,
+            add_files,
+            clear_button,
+        ]
 
     def create_hk_load_output_card(
         self,
@@ -3057,36 +3242,190 @@ class LuftmengenGUI:
     # HK LASTVERGLEICH – DATEIAUSWAHL
     # ========================================================
 
+
     def choose_hk_load_schema(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Strangschema Klimawärme/Kälte auswählen",
+        # Rückwärtskompatibler Alias
+        self.choose_hk_load_schemas()
+
+
+    def clear_hk_load_schema(self) -> None:
+        self.hk_load_schema_pdfs.clear()
+        self.update_hk_load_schema_label()
+
+
+    def update_hk_load_schema_label(self) -> None:
+        self.hk_load_schema_label.config(
+            text=self.format_hk_load_selection(
+                self.hk_load_schema_pdfs,
+                "Keine Strangschemata ausgewählt",
+            )
+        )
+
+
+    def choose_hk_load_schemas(self) -> None:
+        selected = filedialog.askopenfilenames(
+            title="Ein oder mehrere Strangschemata auswählen",
+            filetypes=[("PDF-Dateien", "*.pdf")],
+        )
+
+        self.add_unique_paths(
+            self.hk_load_schema_pdfs,
+            selected,
+        )
+        self.update_hk_load_schema_label()
+
+    def choose_hk_load_schema_folder(self) -> None:
+        folder = filedialog.askdirectory(
+            title="Ordner mit Strangschemata auswählen",
+        )
+
+        if not folder:
+            return
+
+        self.add_unique_paths(
+            self.hk_load_schema_pdfs,
+            sorted(Path(folder).glob("*.pdf")),
+        )
+        self.update_hk_load_schema_label()
+
+
+    def choose_hk_load_excel(self) -> None:
+        selected = filedialog.askopenfilenames(
+            title="Eine oder mehrere Heiz-/Kühllast-Excel-Dateien auswählen",
             filetypes=[
-                (
-                    "PDF-Dateien",
-                    "*.pdf",
-                ),
+                ("Excel-Dateien", "*.xlsx *.xlsm"),
+                ("Alle Dateien", "*.*"),
             ],
         )
 
-        if path:
-            self.hk_load_schema_pdf = Path(
-                path
-            )
-            self.update_hk_load_schema_label()
-
-    def clear_hk_load_schema(self) -> None:
-        self.hk_load_schema_pdf = None
-        self.update_hk_load_schema_label()
-
-    def update_hk_load_schema_label(self) -> None:
-        if self.hk_load_schema_pdf is None:
-            text = "Kein Strangschema ausgewählt"
-        else:
-            text = self.hk_load_schema_pdf.name
-
-        self.hk_load_schema_label.config(
-            text=text
+        self.add_unique_paths(
+            self.hk_load_excel_paths,
+            selected,
         )
+        self.update_hk_load_excel_label()
+
+
+    def choose_hk_load_excel_folder(self) -> None:
+        folder = filedialog.askdirectory(
+            title="Ordner mit Heiz-/Kühllast-Excel-Dateien auswählen",
+        )
+
+        if not folder:
+            return
+
+        folder_path = Path(folder)
+
+        excel_files = sorted(
+            [
+                path
+                for path in folder_path.iterdir()
+                if (
+                    path.is_file()
+                    and path.suffix.casefold()
+                    in {".xlsx", ".xlsm"}
+                    and not path.name.startswith("~$")
+                )
+            ]
+        )
+
+        self.add_unique_paths(
+            self.hk_load_excel_paths,
+            excel_files,
+        )
+        self.update_hk_load_excel_label()
+
+    def update_hk_load_excel_label(self) -> None:
+        self.hk_excel_label.config(
+            text=self.format_hk_load_selection(
+                self.hk_load_excel_paths,
+                "Keine Excel-Dateien ausgewählt",
+            )
+        )
+
+
+    def clear_hk_load_excel(self) -> None:
+        self.hk_load_excel_paths.clear()
+        self.update_hk_load_excel_label()
+
+    def update_hk_load_source_controls(self) -> None:
+        source_type = self.hk_load_source_type.get()
+        scope = self.hk_load_scope.get()
+
+        excel_frame = getattr(
+            self,
+            "hk_excel_source_frame",
+            None,
+        )
+        pdf_frame = getattr(
+            self,
+            "hk_pdf_source_frame",
+            None,
+        )
+
+        if source_type == "excel":
+            if pdf_frame is not None:
+                pdf_frame.grid_remove()
+            if excel_frame is not None:
+                excel_frame.grid()
+
+        else:
+            if excel_frame is not None:
+                excel_frame.grid_remove()
+            if pdf_frame is not None:
+                pdf_frame.grid()
+
+        groups = getattr(
+            self,
+            "hk_pdf_control_groups",
+            {},
+        )
+
+        heating_enabled = (
+            source_type == "pdf"
+            and scope in {"heizung", "beides"}
+        )
+        cooling_enabled = (
+            source_type == "pdf"
+            and scope in {"kuehlung", "beides"}
+        )
+
+        for widget in groups.get(
+            "Heizlast-Grundrisse",
+            [],
+        ):
+            widget.config(
+                state=(
+                    "normal"
+                    if heating_enabled
+                    else "disabled"
+                )
+            )
+
+        for widget in groups.get(
+            "Kühllast-Grundrisse",
+            [],
+        ):
+            widget.config(
+                state=(
+                    "normal"
+                    if cooling_enabled
+                    else "disabled"
+                )
+            )
+
+        # Die nicht benötigte PDF-Auswahl zusätzlich optisch ausblenden.
+        if pdf_frame is not None and source_type == "pdf":
+            if hasattr(self, "hk_heating_label"):
+                if heating_enabled:
+                    self.hk_heating_label.grid()
+                else:
+                    self.hk_heating_label.grid_remove()
+
+            if hasattr(self, "hk_cooling_label"):
+                if cooling_enabled:
+                    self.hk_cooling_label.grid()
+                else:
+                    self.hk_cooling_label.grid_remove()
 
     def add_unique_paths(
         self,
@@ -3098,8 +3437,11 @@ class LuftmengenGUI:
                 path_value
             )
 
+            # Diese Hilfsfunktion wird sowohl für PDFs als auch
+            # für Excel-Dateien verwendet.
             if (
-                path.suffix.lower() == ".pdf"
+                path.suffix.lower()
+                in {".pdf", ".xlsx", ".xlsm"}
                 and path not in target
             ):
                 target.append(
@@ -3235,9 +3577,9 @@ class LuftmengenGUI:
             initial_directory = str(
                 self.hk_load_output_dir
             )
-        elif self.hk_load_schema_pdf is not None:
+        elif self.hk_load_schema_pdfs:
             initial_directory = str(
-                self.hk_load_schema_pdf.parent
+                self.hk_load_schema_pdfs[0].parent
             )
 
         dialog_arguments: dict[str, object] = {
@@ -3268,20 +3610,50 @@ class LuftmengenGUI:
     # HK LASTVERGLEICH – LOGIK
     # ========================================================
 
+
     def validate_hk_load_inputs(self) -> None:
-        if self.hk_load_schema_pdf is None:
+        if not self.hk_load_schema_pdfs:
             raise ValueError(
-                "Bitte ein Strangschema auswählen."
+                "Bitte mindestens ein Strangschema auswählen."
             )
 
-        if not self.hk_heating_pdfs:
+        source_type = self.hk_load_source_type.get()
+        scope = self.hk_load_scope.get()
+
+        if scope not in {
+            "heizung",
+            "kuehlung",
+            "beides",
+        }:
             raise ValueError(
-                "Bitte mindestens einen Heizlast-Grundriss auswählen."
+                "Bitte einen gültigen Prüfumfang auswählen."
             )
 
-        if not self.hk_cooling_pdfs:
+        if source_type == "excel":
+            if not self.hk_load_excel_paths:
+                raise ValueError(
+                    "Bitte mindestens eine Heiz-/Kühllast-Excel auswählen."
+                )
+
+        elif source_type == "pdf":
+            if (
+                scope in {"heizung", "beides"}
+                and not self.hk_heating_pdfs
+            ):
+                raise ValueError(
+                    "Bitte mindestens einen Heizlast-Grundriss auswählen."
+                )
+
+            if (
+                scope in {"kuehlung", "beides"}
+                and not self.hk_cooling_pdfs
+            ):
+                raise ValueError(
+                    "Bitte mindestens einen Kühllast-Grundriss auswählen."
+                )
+        else:
             raise ValueError(
-                "Bitte mindestens einen Kühllast-Grundriss auswählen."
+                "Bitte PDF oder Excel als Lastquelle auswählen."
             )
 
         if self.hk_load_output_dir is None:
@@ -3342,6 +3714,7 @@ class LuftmengenGUI:
             message,
         )
 
+
     def start_hk_load(self) -> None:
         try:
             self.validate_hk_load_inputs()
@@ -3354,7 +3727,11 @@ class LuftmengenGUI:
             return
 
         self.hk_load_progress.config(
-            value=0
+            value=0,
+            maximum=max(
+                1,
+                len(self.hk_load_schema_pdfs),
+            ),
         )
 
         self.hk_load_status.config(
@@ -3362,186 +3739,253 @@ class LuftmengenGUI:
             fg=MUTED_TEXT_COLOR,
         )
 
-        self.set_hk_load_running_state(
-            True
-        )
+        self.set_hk_load_running_state(True)
 
         worker = threading.Thread(
             target=self.run_hk_load_worker,
             daemon=True,
         )
-
         worker.start()
+
 
     def run_hk_load_worker(self) -> None:
         try:
-            assert self.hk_load_schema_pdf is not None
             assert self.hk_load_output_dir is not None
 
-            self.thread_safe_hk_load_progress(
-                1,
-                "1/5 Strangschema wird ausgewertet …",
+            source_type = self.hk_load_source_type.get()
+            mode = self.hk_load_scope.get()
+
+            compare_heating = mode in {
+                "heizung",
+                "beides",
+            }
+            compare_cooling = mode in {
+                "kuehlung",
+                "beides",
+            }
+
+            created_files: list[Path] = []
+            result_rows: list[dict[str, object]] = []
+
+            total = len(
+                self.hk_load_schema_pdfs
             )
 
-            schema = extract_and_consolidate_schema(
-                self.hk_load_schema_pdf
-            )
-
-            building = determine_document_building(
-                schema
-            )
-
-            if building not in {
-                "MIT1",
-                "MIT2",
-            }:
-                raise ValueError(
-                    "Das Gebäude des Strangschemas konnte "
-                    "nicht eindeutig als MIT1 oder MIT2 erkannt werden."
+            for index, schema_path in enumerate(
+                self.hk_load_schema_pdfs,
+                start=1,
+            ):
+                self.thread_safe_hk_load_progress(
+                    index - 1,
+                    (
+                        f"Strangschema {index}/{total} wird ausgewertet: "
+                        f"{schema_path.name}"
+                    ),
                 )
 
-            self.thread_safe_hk_load_progress(
-                2,
-                "2/5 Heizlast-Grundrisse werden ausgewertet …",
-            )
+                schema = extract_and_consolidate_schema(
+                    schema_path
+                )
 
-            (
-                heating,
-                heating_check,
-            ) = extract_loads_from_pdfs_checked(
-                self.hk_heating_pdfs,
-                "Heizlast",
-                expected_building=building,
-            )
+                building = determine_document_building(
+                    schema
+                )
 
-            rejected_heating = (
-                heating_check.loc[
-                    heating_check[
-                        "akzeptiert"
+                if building not in {
+                    "MIT1",
+                    "MIT2",
+                    "MIT12",
+                }:
+                    raise ValueError(
+                        "Gebäudeumfang des Strangschemas konnte nicht "
+                        f"erkannt werden:\n{schema_path.name}"
+                    )
+
+                if source_type == "excel":
+                    assert self.hk_load_excel_paths
+
+                    (
+                        heating,
+                        cooling,
+                        check_dataframe,
+                    ) = extract_loads_from_excels_checked(
+                        excel_paths=self.hk_load_excel_paths,
+                        mode=mode,
+                        expected_building=building,
+                    )
+
+                    if (
+                        not check_dataframe.empty
+                        and "lastart"
+                        in check_dataframe.columns
+                    ):
+                        heating_check = (
+                            check_dataframe.loc[
+                                check_dataframe[
+                                    "lastart"
+                                ].astype(str)
+                                == "Heizlast"
+                            ]
+                            .copy()
+                            .reset_index(drop=True)
+                        )
+
+                        cooling_check = (
+                            check_dataframe.loc[
+                                check_dataframe[
+                                    "lastart"
+                                ].astype(str)
+                                == "Kühllast"
+                            ]
+                            .copy()
+                            .reset_index(drop=True)
+                        )
+                    else:
+                        heating_check = (
+                            check_dataframe.copy()
+                        )
+                        cooling_check = (
+                            check_dataframe.copy()
+                        )
+
+                    heating_sources = (
+                        list(self.hk_load_excel_paths)
+                        if compare_heating
+                        else []
+                    )
+                    cooling_sources = (
+                        list(self.hk_load_excel_paths)
+                        if compare_cooling
+                        else []
+                    )
+
+                else:
+                    if compare_heating:
+                        (
+                            heating,
+                            heating_check,
+                        ) = extract_loads_from_pdfs_checked(
+                            self.hk_heating_pdfs,
+                            "Heizlast",
+                            expected_building=building,
+                        )
+                    else:
+                        heating = schema.iloc[0:0].copy()
+                        heating_check = schema.iloc[0:0].copy()
+
+                    if compare_cooling:
+                        (
+                            cooling,
+                            cooling_check,
+                        ) = extract_loads_from_pdfs_checked(
+                            self.hk_cooling_pdfs,
+                            "Kühllast",
+                            expected_building=building,
+                        )
+                    else:
+                        cooling = schema.iloc[0:0].copy()
+                        cooling_check = schema.iloc[0:0].copy()
+
+                    heating_sources = (
+                        self.hk_heating_pdfs
+                        if compare_heating
+                        else []
+                    )
+                    cooling_sources = (
+                        self.hk_cooling_pdfs
+                        if compare_cooling
+                        else []
+                    )
+
+                comparison = compare_loads_with_schema(
+                    heating=heating,
+                    cooling=cooling,
+                    consolidated_schema=schema,
+                    compare_heating=compare_heating,
+                    compare_cooling=compare_cooling,
+                )
+
+                timestamp = datetime.now().strftime(
+                    "%Y%m%d_%H%M%S"
+                )
+
+                safe_schema_stem = (
+                    schema_path.stem
+                    .replace(" ", "_")
+                    .replace("/", "_")
+                    .replace("\\", "_")
+                )
+
+                output_path = (
+                    self.hk_load_output_dir
+                    / (
+                        f"Lastvergleich_{building}_"
+                        f"{safe_schema_stem}_{timestamp}.xlsx"
+                    )
+                )
+
+                export_kwargs = {
+                    "output_path": output_path,
+                    "comparison": comparison,
+                    "schema_pdf": schema_path,
+                    "heating_pdfs": heating_sources,
+                    "cooling_pdfs": cooling_sources,
+                    "building": building,
+                    "heating_check": heating_check,
+                    "cooling_check": cooling_check,
+                }
+
+                # Neue Exportversion kennt source_type/comparison_scope.
+                # Falls lokal noch die ältere Exportdatei liegt, läuft
+                # die GUI trotzdem weiter statt mit TypeError abzubrechen.
+                export_parameters = inspect.signature(
+                    export_load_comparison_excel
+                ).parameters
+
+                if "source_type" in export_parameters:
+                    export_kwargs["source_type"] = source_type
+
+                if "comparison_scope" in export_parameters:
+                    export_kwargs["comparison_scope"] = mode
+
+                export_load_comparison_excel(
+                    **export_kwargs
+                )
+
+                created_files.append(
+                    output_path
+                )
+
+                counts = (
+                    comparison[
+                        "status_gesamt"
                     ]
-                    == False
-                ]
-                if not heating_check.empty
-                else heating_check
-            )
-
-            self.thread_safe_hk_load_progress(
-                3,
-                "3/5 Kühllast-Grundrisse werden ausgewertet …",
-            )
-
-            (
-                cooling,
-                cooling_check,
-            ) = extract_loads_from_pdfs_checked(
-                self.hk_cooling_pdfs,
-                "Kühllast",
-                expected_building=building,
-            )
-
-            rejected_cooling = (
-                cooling_check.loc[
-                    cooling_check[
-                        "akzeptiert"
-                    ]
-                    == False
-                ]
-                if not cooling_check.empty
-                else cooling_check
-            )
-
-            if heating.empty:
-                raise ValueError(
-                    "Keiner der ausgewählten Heizlast-Grundrisse "
-                    "konnte für das erkannte Gebäude verwendet werden."
+                    .value_counts()
+                    .to_dict()
                 )
 
-            if cooling.empty:
-                raise ValueError(
-                    "Keiner der ausgewählten Kühllast-Grundrisse "
-                    "konnte für das erkannte Gebäude verwendet werden."
+                result_rows.append(
+                    {
+                        "schema": schema_path.name,
+                        "building": building,
+                        "counts": counts,
+                        "output_path": output_path,
+                    }
                 )
 
-            self.thread_safe_hk_load_progress(
-                4,
-                "4/5 Lasten werden mit dem Strangschema verglichen …",
-            )
-
-            comparison = compare_loads_with_schema(
-                heating,
-                cooling,
-                schema,
-            )
-
-            scope = comparison.attrs.get(
-                "vergleichsumfang",
-                {},
-            )
-
-            timestamp = datetime.now().strftime(
-                "%Y%m%d_%H%M%S"
-            )
-
-            output_path = (
-                self.hk_load_output_dir
-                / f"Lastvergleich_Heizung_Kaelte_{building}_{timestamp}.xlsx"
-            )
-
-            self.thread_safe_hk_load_progress(
-                5,
-                "5/5 Excel-Auswertung wird erstellt …",
-            )
-
-            export_load_comparison_excel(
-                output_path=output_path,
-                comparison=comparison,
-                schema_pdf=self.hk_load_schema_pdf,
-                heating_pdfs=self.hk_heating_pdfs,
-                cooling_pdfs=self.hk_cooling_pdfs,
-                building=building,
-                heating_check=heating_check,
-                cooling_check=cooling_check,
-            )
-
-            counts = (
-                comparison[
-                    "status_gesamt"
-                ]
-                .value_counts()
-                .to_dict()
-            )
+                self.thread_safe_hk_load_progress(
+                    index,
+                    (
+                        f"{index}/{total} abgeschlossen: "
+                        f"{schema_path.name}"
+                    ),
+                )
 
             result = {
-                "output_path":
-                    output_path,
-
-                "building":
-                    building,
-
-                "levels":
-                    scope.get(
-                        "beruecksichtigte_ebenen",
-                        [],
-                    ),
-
-                "ignored_levels":
-                    scope.get(
-                        "ausgeschlossene_schema_ebenen",
-                        [],
-                    ),
-
-                "counts":
-                    counts,
-
-                "rejected_heating":
-                    len(
-                        rejected_heating
-                    ),
-
-                "rejected_cooling":
-                    len(
-                        rejected_cooling
-                    ),
+                "created_files": created_files,
+                "results": result_rows,
+                "source_type": source_type,
+                "scope": mode,
             }
 
             self.root.after(
@@ -3557,130 +4001,84 @@ class LuftmengenGUI:
                 error,
             )
 
+
     def handle_hk_load_success(
         self,
         result: dict[str, object],
     ) -> None:
+        created_files = result.get(
+            "created_files",
+            [],
+        )
+        results = result.get(
+            "results",
+            [],
+        )
+
         self.hk_load_progress.config(
-            value=5
-        )
-
-        levels = result.get(
-            "levels",
-            [],
-        )
-
-        ignored_levels = result.get(
-            "ignored_levels",
-            [],
-        )
-
-        counts = result.get(
-            "counts",
-            {},
-        )
-
-        output_path = result.get(
-            "output_path",
-            "",
-        )
-
-        building = result.get(
-            "building",
-            "",
-        )
-
-        rejected_heating = int(
-            result.get(
-                "rejected_heating",
-                0,
+            value=max(
+                1,
+                len(created_files)
+                if isinstance(created_files, list)
+                else 1,
             )
-        )
-
-        rejected_cooling = int(
-            result.get(
-                "rejected_cooling",
-                0,
-            )
-        )
-
-        level_text = (
-            ", ".join(
-                levels
-            )
-            if isinstance(
-                levels,
-                list,
-            )
-            and levels
-            else "-"
-        )
-
-        ignored_text = (
-            ", ".join(
-                ignored_levels
-            )
-            if isinstance(
-                ignored_levels,
-                list,
-            )
-            and ignored_levels
-            else "keine"
         )
 
         self.hk_load_status.config(
             text=(
                 "Lastvergleich erfolgreich abgeschlossen. "
-                f"Geprüfte Ebenen: {level_text}"
+                f"{len(created_files) if isinstance(created_files, list) else 0} "
+                "Ergebnisdatei(en) erstellt."
             ),
             fg=SUCCESS_COLOR,
         )
 
-        self.set_hk_load_running_state(
-            False
+        self.set_hk_load_running_state(False)
+        self.update_hk_load_source_controls()
+
+        summary_lines: list[str] = []
+
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+
+                counts = item.get(
+                    "counts",
+                    {},
+                )
+
+                status_text = (
+                    ", ".join(
+                        f"{status}: {count}"
+                        for status, count in counts.items()
+                    )
+                    if isinstance(counts, dict)
+                    else ""
+                )
+
+                summary_lines.append(
+                    (
+                        f"{item.get('schema', '')}\n"
+                        f"Gebäude: {item.get('building', '')}\n"
+                        f"{status_text}"
+                    )
+                )
+
+        output_dir_text = (
+            str(self.hk_load_output_dir)
+            if self.hk_load_output_dir is not None
+            else ""
         )
-
-        if isinstance(
-            counts,
-            dict,
-        ):
-            status_lines = [
-                f"{status}: {count}"
-                for status, count
-                in counts.items()
-            ]
-            status_text = "\n".join(
-                status_lines
-            )
-        else:
-            status_text = ""
-
-        rejected_text = ""
-
-        if (
-            rejected_heating
-            or rejected_cooling
-        ):
-            rejected_text = (
-                "\n\nHinweis: "
-                f"{rejected_heating} Heizlast- und "
-                f"{rejected_cooling} Kühllast-Datei(en) "
-                "wurden wegen der Gebäudeprüfung nicht verwendet. "
-                "Details stehen im Excel-Blatt «Dateiprüfung»."
-            )
 
         messagebox.showinfo(
             "Lastvergleich abgeschlossen",
             (
-                "Der HK-Lastvergleich wurde erfolgreich abgeschlossen.\n\n"
-                f"Gebäude: {building}\n"
-                f"Geprüfte Ebenen: {level_text}\n"
-                f"Nicht geprüfte Schema-Ebenen: {ignored_text}\n\n"
-                "WICHTIG: Andere Ebenen des Strangschemas wurden "
-                "in diesem Lauf nicht geprüft.\n\n"
-                f"{status_text}"
-                f"{rejected_text}\n\n"
-                f"Excel-Auswertung:\n{output_path}"
+                f"{len(created_files) if isinstance(created_files, list) else 0} "
+                "Strangschema/Strangschemata wurden verarbeitet.\n\n"
+                + "\n\n".join(summary_lines)
+                + "\n\nAusgabeordner:\n"
+                + output_dir_text
             ),
         )
 
@@ -3698,10 +4096,28 @@ class LuftmengenGUI:
         self.set_hk_load_running_state(
             False
         )
+        self.update_hk_load_source_controls()
+
+        details = "".join(
+            traceback.format_exception(
+                type(error),
+                error,
+                error.__traceback__,
+            )
+        )
+
+        print(
+            "\n===== HK-LASTVERGLEICH FEHLER =====\n"
+            + details
+            + "====================================\n"
+        )
 
         messagebox.showerror(
             "Fehler",
-            str(error),
+            (
+                f"{error}\n\n"
+                "Der vollständige Fehler steht im PowerShell-Fenster."
+            ),
         )
 
     # ========================================================

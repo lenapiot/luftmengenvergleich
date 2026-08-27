@@ -8,6 +8,8 @@ from typing import Iterable
 import fitz
 import pandas as pd
 
+from hk.lastvergleich_excel_input import extract_loads_from_excel
+
 
 # ============================================================
 # REGEX
@@ -516,31 +518,155 @@ def extract_loads_from_pdf(
 def determine_document_building(
     dataframe: pd.DataFrame,
 ) -> str:
+    """
+    Bestimmt den Gebäudeumfang eines STRANGSCHEMAS anhand seiner
+    eindeutigen Raumnummern.
+
+    Projektregel:
+    - nur MIT1-Räume -> MIT1
+    - nur MIT2-Räume -> MIT2
+    - MIT1 + MIT2:
+        Minderheitsanteil < 10 %  -> dominantes Gebäude
+        Minderheitsanteil >= 10 % -> MIT12
+
+    Das verhindert, dass einzelne stehengebliebene Räume des anderen
+    Gebäudeteils ein eigentliches MIT1- oder MIT2-Strangschema fälschlich
+    zu MIT12 machen.
+    """
     if dataframe.empty:
         return "Unbekannt"
 
     if "gebaeude" not in dataframe.columns:
         return "Unbekannt"
 
-    buildings = dataframe["gebaeude"].dropna().astype(str)
-    buildings = buildings[buildings.isin(["MIT1", "MIT2"])]
+    room_counts = {}
 
-    if buildings.empty:
+    for building_name in ("MIT1", "MIT2"):
+        if "raumnummer" in dataframe.columns:
+            count = int(
+                dataframe.loc[
+                    dataframe["gebaeude"] == building_name,
+                    "raumnummer",
+                ]
+                .dropna()
+                .astype(str)
+                .nunique()
+            )
+        else:
+            count = int(
+                (
+                    dataframe["gebaeude"]
+                    .astype(str)
+                    == building_name
+                ).sum()
+            )
+
+        room_counts[building_name] = count
+
+    mit1_count = room_counts["MIT1"]
+    mit2_count = room_counts["MIT2"]
+    total = mit1_count + mit2_count
+
+    if total == 0:
         return "Unbekannt"
 
-    counts = buildings.value_counts()
+    if mit1_count > 0 and mit2_count == 0:
+        return "MIT1"
 
-    if len(counts) == 1:
-        return counts.index[0]
+    if mit2_count > 0 and mit1_count == 0:
+        return "MIT2"
 
-    total = int(counts.sum())
-    strongest = counts.index[0]
-    strongest_count = int(counts.iloc[0])
+    if mit1_count >= mit2_count:
+        dominant = "MIT1"
+        minority_count = mit2_count
+    else:
+        dominant = "MIT2"
+        minority_count = mit1_count
 
-    if total > 0 and strongest_count / total >= 0.90:
-        return strongest
+    minority_share = (
+        minority_count / total
+    )
 
-    return "Gemischt"
+    if (
+        minority_share
+        >= MIT12_MINORITY_THRESHOLD
+    ):
+        return "MIT12"
+
+    return dominant
+
+
+def _allowed_buildings_for_schema(
+    expected_building: str | None,
+) -> set[str]:
+    """
+    Gebäudeumfang des gewählten Strangschemas.
+
+    MIT1  -> nur MIT1-Räume
+    MIT2  -> nur MIT2-Räume
+    MIT12 -> MIT1- und MIT2-Räume
+    None  -> beide Gebäudeteile
+    """
+    if expected_building is None:
+        return {"MIT1", "MIT2"}
+
+    expected = expected_building.strip().upper()
+
+    if expected == "MIT1":
+        return {"MIT1"}
+
+    if expected == "MIT2":
+        return {"MIT2"}
+
+    if expected == "MIT12":
+        return {"MIT1", "MIT2"}
+
+    raise ValueError(
+        "expected_building muss None, 'MIT1', 'MIT2' oder 'MIT12' sein."
+    )
+
+
+def filter_schema_for_building(
+    consolidated_schema: pd.DataFrame,
+    building: str,
+) -> pd.DataFrame:
+    """
+    Beschränkt ein konsolidiertes Strangschema auf den tatsächlich
+    erkannten Gebäudeumfang.
+
+    Fachregel:
+    - MIT1  -> nur MIT1-Räume
+    - MIT2  -> nur MIT2-Räume
+    - MIT12 -> MIT1- und MIT2-Räume
+
+    Dadurch werden einzelne stehengebliebene Räume des anderen
+    Gebäudeteils nicht in den fachlichen Abgleich übernommen.
+    """
+    allowed_buildings = _allowed_buildings_for_schema(
+        building
+    )
+
+    if consolidated_schema.empty:
+        return consolidated_schema.copy()
+
+    if "gebaeude" not in consolidated_schema.columns:
+        raise ValueError(
+            "Das konsolidierte Strangschema enthält keine Spalte 'gebaeude'."
+        )
+
+    filtered = (
+        consolidated_schema.loc[
+            consolidated_schema[
+                "gebaeude"
+            ].isin(
+                allowed_buildings
+            )
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+
+    return filtered
 
 
 # ============================================================
@@ -553,26 +679,17 @@ def check_pdf_building(
     expected_building: str | None = None,
 ) -> tuple[pd.DataFrame, FileBuildingCheck]:
     """
-    Prüft einen Heiz-/Kühllast-Grundriss gegen das erwartete Gebäude.
+    Liest einen Heiz-/Kühllast-Grundriss und filtert ihn ausschliesslich
+    nach dem Gebäudeumfang des Strangschemas.
 
-    Gebäudeklassifikation:
-    - nur MIT1-Räume -> MIT1
-    - nur MIT2-Räume -> MIT2
-    - beide Gebäudeteile mit mindestens 10 % Minderheitsanteil -> MIT12
-    - kleiner Gebäudeteil < 10 % -> dominantes Gebäude mit Restbestand
+    Fachregel:
+    - MIT1-Schema  -> nur MIT1-Räume
+    - MIT2-Schema  -> nur MIT2-Räume
+    - MIT12-Schema -> MIT1- und MIT2-Räume
 
-    Beispiele:
-    - 200 MIT1 + 9 MIT2  -> "MIT1 mit MIT2-Rest"
-    - 120 MIT1 + 80 MIT2 -> "MIT12"
-
-    Für ein MIT2-Strangschema gilt:
-    - MIT2: akzeptieren
-    - MIT12: akzeptieren und nur MIT2-Räume vergleichen
-    - MIT1 mit MIT2-Rest: ablehnen; die wenigen MIT2-Räume gelten nur als
-      stehengebliebener Rest und machen den Plan nicht zu einem MIT2-Plan.
-
-    Räume des jeweils anderen Gebäudeteils werden separat dokumentiert und
-    niemals als fachlicher Vergleichsfehler gewertet.
+    Räume des anderen Gebäudeteils werden dokumentiert, aber nicht bewertet.
+    Eine PDF wird NICHT abgelehnt, nur weil sie zusätzlich Räume des anderen
+    Gebäudeteils enthält.
     """
     pdf_path = Path(pdf_path)
 
@@ -581,321 +698,75 @@ def check_pdf_building(
         load_type,
     )
 
+    allowed_buildings = _allowed_buildings_for_schema(
+        expected_building
+    )
+
+    detected_building = determine_document_building(
+        raw_dataframe
+    )
+
     expected = (
-        expected_building.upper()
+        expected_building.strip().upper()
         if expected_building
         else None
     )
 
-    if expected not in {None, "MIT1", "MIT2"}:
-        raise ValueError(
-            "expected_building muss None, 'MIT1' oder 'MIT2' sein."
+    valid_building_mask = (
+        raw_dataframe["gebaeude"].isin(
+            allowed_buildings
         )
-
-    # --------------------------------------------------------
-    # GEBÄUDEANTEILE ÜBER EINDEUTIGE RAUMNUMMERN BESTIMMEN
-    # --------------------------------------------------------
-
-    room_counts = {
-        "MIT1": 0,
-        "MIT2": 0,
-    }
-
-    if not raw_dataframe.empty:
-        for building_name in (
-            "MIT1",
-            "MIT2",
-        ):
-            room_counts[
-                building_name
-            ] = int(
-                raw_dataframe.loc[
-                    raw_dataframe[
-                        "gebaeude"
-                    ]
-                    == building_name,
-                    "raumnummer",
-                ]
-                .dropna()
-                .nunique()
-            )
-
-    mit1_count = room_counts[
-        "MIT1"
-    ]
-    mit2_count = room_counts[
-        "MIT2"
-    ]
-
-    total_building_rooms = (
-        mit1_count
-        + mit2_count
+        if not raw_dataframe.empty
+        else pd.Series(
+            dtype=bool
+        )
     )
 
-    present_buildings = {
-        building_name
-        for building_name, count
-        in room_counts.items()
-        if count > 0
-    }
-
-    dominant_building: str | None = None
-    minority_building: str | None = None
-    minority_share = 0.0
-    is_true_mit12 = False
-    is_dominant_with_rest = False
-
-    if total_building_rooms == 0:
-        detected_building = (
-            "Unbekannt"
-        )
-
-    elif mit1_count > 0 and mit2_count == 0:
-        detected_building = (
-            "MIT1"
-        )
-        dominant_building = (
-            "MIT1"
-        )
-
-    elif mit2_count > 0 and mit1_count == 0:
-        detected_building = (
-            "MIT2"
-        )
-        dominant_building = (
-            "MIT2"
-        )
-
+    if raw_dataframe.empty:
+        used_dataframe = raw_dataframe.copy()
+        other_building_dataframe = raw_dataframe.copy()
     else:
-        if mit1_count >= mit2_count:
-            dominant_building = (
-                "MIT1"
-            )
-            minority_building = (
-                "MIT2"
-            )
-            minority_count = (
-                mit2_count
-            )
-        else:
-            dominant_building = (
-                "MIT2"
-            )
-            minority_building = (
-                "MIT1"
-            )
-            minority_count = (
-                mit1_count
-            )
-
-        minority_share = (
-            minority_count
-            / total_building_rooms
-        )
-
-        if (
-            minority_share
-            >= MIT12_MINORITY_THRESHOLD
-        ):
-            detected_building = (
-                "MIT12"
-            )
-            is_true_mit12 = True
-
-        else:
-            detected_building = (
-                f"{dominant_building} mit "
-                f"{minority_building}-Rest"
-            )
-            is_dominant_with_rest = True
-
-    # --------------------------------------------------------
-    # AKZEPTANZ GEGEN DAS STRANGSCHEMA
-    # --------------------------------------------------------
-
-    accepted = True
-    reason = "OK"
-
-    used_dataframe = (
-        raw_dataframe.copy()
-    )
-
-    other_building_dataframe = (
-        raw_dataframe.iloc[
-            0:0
-        ].copy()
-    )
-
-    if detected_building == "Unbekannt":
-        accepted = False
-
-        reason = (
-            "Gebäude konnte nicht bestimmt werden."
-        )
-
         used_dataframe = (
-            raw_dataframe.iloc[
-                0:0
-            ].copy()
+            raw_dataframe.loc[
+                valid_building_mask
+            ]
+            .copy()
         )
 
-    elif expected is None:
-        # Ohne Zielgebäude bleibt die vollständige Datei erhalten.
+        other_building_dataframe = (
+            raw_dataframe.loc[
+                raw_dataframe["gebaeude"].isin(
+                    {"MIT1", "MIT2"}
+                )
+                & ~valid_building_mask
+            ]
+            .copy()
+        )
+
+    # Die Datei ist akzeptiert, sobald sie mindestens einen für das
+    # Strangschema relevanten Raum enthält. Bei leerer Extraktion oder
+    # ausschliesslich falschem Gebäudeteil wird sie nicht verwendet.
+    accepted = not used_dataframe.empty
+
+    if raw_dataframe.empty:
+        reason = (
+            "Keine gültigen Lastdaten erkannt."
+        )
+    elif accepted and other_building_dataframe.empty:
         reason = "OK"
-
-    elif is_true_mit12:
-        # Echter gemischter Plan:
-        # Zielgebäude wird ausgewertet, anderer Teil nur dokumentiert.
-        if expected not in present_buildings:
-            accepted = False
-
-            reason = (
-                f"MIT12 erkannt, aber keine {expected}-Räume gefunden."
-            )
-
-            used_dataframe = (
-                raw_dataframe.iloc[
-                    0:0
-                ].copy()
-            )
-
-        else:
-            used_dataframe = (
-                raw_dataframe.loc[
-                    raw_dataframe[
-                        "gebaeude"
-                    ]
-                    == expected
-                ].copy()
-            )
-
-            other_building_dataframe = (
-                raw_dataframe.loc[
-                    raw_dataframe[
-                        "gebaeude"
-                    ].isin(
-                        {
-                            "MIT1",
-                            "MIT2",
-                        }
-                    )
-                    & (
-                        raw_dataframe[
-                            "gebaeude"
-                        ]
-                        != expected
-                    )
-                ].copy()
-            )
-
-            other_building = (
-                "MIT1"
-                if expected
-                == "MIT2"
-                else "MIT2"
-            )
-
-            reason = (
-                "Echter MIT12-Grundriss: "
-                f"{expected}-Räume werden ausgewertet. "
-                f"{other_building}-Räume werden dokumentiert, "
-                "aber nicht bewertet und nicht als Fehler gewertet. "
-                f"Anteile: MIT1={mit1_count}, MIT2={mit2_count}."
-            )
-
-    elif is_dominant_with_rest:
-        assert dominant_building is not None
-        assert minority_building is not None
-
-        if expected == dominant_building:
-            # Passender Hauptplan; kleiner Rest wird ignoriert/dokumentiert.
-            accepted = True
-
-            used_dataframe = (
-                raw_dataframe.loc[
-                    raw_dataframe[
-                        "gebaeude"
-                    ]
-                    == expected
-                ].copy()
-            )
-
-            other_building_dataframe = (
-                raw_dataframe.loc[
-                    raw_dataframe[
-                        "gebaeude"
-                    ]
-                    == minority_building
-                ].copy()
-            )
-
-            reason = (
-                f"{dominant_building}-Plan mit kleinem "
-                f"{minority_building}-Rest "
-                f"({minority_share:.1%}, Grenzwert "
-                f"{MIT12_MINORITY_THRESHOLD:.0%}). "
-                f"{dominant_building}-Räume werden ausgewertet; "
-                f"{minority_building}-Räume nur dokumentiert."
-            )
-
-        else:
-            # Der erwartete Gebäudeteil ist nur der kleine Rest.
-            # Das darf den Plan NICHT passend machen.
-            accepted = False
-
-            used_dataframe = (
-                raw_dataframe.iloc[
-                    0:0
-                ].copy()
-            )
-
-            reason = (
-                f"Abgelehnt: überwiegend {dominant_building}. "
-                f"{minority_building} ist nur ein kleiner Rest "
-                f"({minority_share:.1%}, unter "
-                f"{MIT12_MINORITY_THRESHOLD:.0%}). "
-                f"Erwartet wird {expected}. "
-                f"Raumanzahl: MIT1={mit1_count}, MIT2={mit2_count}."
-            )
-
+    elif accepted:
+        reason = (
+            f"Für {expected or 'MIT1/MIT2'} relevante Räume werden ausgewertet. "
+            "Räume des anderen Gebäudeteils werden nicht in den Abgleich "
+            "einbezogen."
+        )
     else:
-        # Reiner MIT1- oder MIT2-Plan.
-        if dominant_building == expected:
-            accepted = True
-
-            used_dataframe = (
-                raw_dataframe.loc[
-                    raw_dataframe[
-                        "gebaeude"
-                    ]
-                    == expected
-                ].copy()
-            )
-
-            reason = "OK"
-
-        else:
-            accepted = False
-
-            used_dataframe = (
-                raw_dataframe.iloc[
-                    0:0
-                ].copy()
-            )
-
-            reason = (
-                f"Erkannt: {dominant_building}; erwartet: {expected}."
-            )
-
-    # --------------------------------------------------------
-    # NICHT GEPRÜFTE RÄUME DOKUMENTIEREN
-    # --------------------------------------------------------
+        reason = (
+            f"Keine Räume passend zum Strangschema "
+            f"{expected or 'MIT1/MIT2'} gefunden."
+        )
 
     if not other_building_dataframe.empty:
-        other_building_dataframe = (
-            other_building_dataframe.copy()
-        )
-
         other_building_dataframe[
             "zielgebaeude"
         ] = expected
@@ -903,56 +774,41 @@ def check_pdf_building(
         other_building_dataframe[
             "nicht_geprueft_grund"
         ] = (
-            "Anderer Gebäudeteil im Grundriss – "
-            "nicht Teil des gewählten Strangschemas"
+            "Anderer Gebäudeteil als im Strangschema – "
+            "nicht in den Abgleich einbezogen"
         )
 
     used_dataframe.attrs[
         "nicht_gepruefte_raeume"
-    ] = (
-        other_building_dataframe
-    )
+    ] = other_building_dataframe
 
     check = FileBuildingCheck(
         datei=pdf_path.name,
-        pfad=str(
-            pdf_path
-        ),
+        pfad=str(pdf_path),
         lastart=load_type,
         erkanntes_gebaeude=detected_building,
         erwartetes_gebaeude=expected,
         akzeptiert=accepted,
         grund=reason,
-        anzahl_datensaetze=len(
-            raw_dataframe
-        ),
+        anzahl_datensaetze=len(raw_dataframe),
         anzahl_raeume=(
-            raw_dataframe[
-                "raumnummer"
-            ].nunique()
+            raw_dataframe["raumnummer"].nunique()
             if not raw_dataframe.empty
             else 0
         ),
         anzahl_raeume_verwendet=(
-            used_dataframe[
-                "raumnummer"
-            ].nunique()
+            used_dataframe["raumnummer"].nunique()
             if not used_dataframe.empty
             else 0
         ),
         anzahl_raeume_anderes_gebaeude=(
-            other_building_dataframe[
-                "raumnummer"
-            ].nunique()
+            other_building_dataframe["raumnummer"].nunique()
             if not other_building_dataframe.empty
             else 0
         ),
     )
 
-    return (
-        used_dataframe,
-        check,
-    )
+    return used_dataframe, check
 
 
 # ============================================================
@@ -1053,16 +909,11 @@ def extract_loads_from_pdfs_checked(
                 ignore_index=True,
             )
             .drop_duplicates()
-            .sort_values(
-                [
-                    "gebaeude",
-                    "ebene",
-                    "raumnummer",
-                    "datei",
-                    "seite",
-                ]
-            )
             .reset_index(drop=True)
+        )
+
+        not_checked_combined = _safe_sort_load_dataframe(
+            not_checked_combined
         )
     else:
         not_checked_combined = pd.DataFrame(
@@ -1168,6 +1019,607 @@ def extract_loads_from_pdfs(
             ]
         )
         .reset_index(drop=True)
+    )
+
+
+
+def _safe_sort_load_dataframe(
+    dataframe: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Sortiert Lastdaten robust, auch wenn einzelne Sortierspalten
+    None/NaN enthalten. Die Originalspalten werden nicht verändert.
+    """
+    if dataframe.empty:
+        return dataframe.copy()
+
+    result = dataframe.copy()
+
+    sort_columns = [
+        column
+        for column in (
+            "gebaeude",
+            "ebene",
+            "raumnummer",
+            "datei",
+            "seite",
+        )
+        if column in result.columns
+    ]
+
+    if not sort_columns:
+        return result.reset_index(drop=True)
+
+    temp_columns: list[str] = []
+
+    for column in sort_columns:
+        temp_column = (
+            f"__sort_{column}"
+        )
+        temp_columns.append(
+            temp_column
+        )
+
+        if column == "seite":
+            # Excel-Zeile / PDF-Seite:
+            # fehlende Werte werden ans Ende sortiert.
+            result[temp_column] = pd.to_numeric(
+                result[column],
+                errors="coerce",
+            ).fillna(
+                10**12
+            )
+        else:
+            result[temp_column] = (
+                result[column]
+                .fillna("")
+                .astype(str)
+            )
+
+    result = (
+        result
+        .sort_values(
+            temp_columns,
+            kind="stable",
+        )
+        .drop(
+            columns=temp_columns,
+        )
+        .reset_index(drop=True)
+    )
+
+    return result
+
+
+# ============================================================
+# EXCEL: HEIZ-/KÜHLLASTEN IN BESTEHENDES DATENMODELL ÜBERFÜHREN
+# ============================================================
+
+def _empty_load_dataframe() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "raumnummer",
+            "raumname",
+            "leistung_w",
+            "vergleichswert_w",
+            "ist_marker",
+            "marker_typ",
+            "lastart",
+            "gebaeude",
+            "ebene",
+            "datei",
+            "seite",
+        ]
+    )
+
+
+def _filter_dataframe_for_expected_building(
+    dataframe: pd.DataFrame,
+    expected_building: str | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool, str, str]:
+    """
+    Filtert Excel-Lastdaten ausschliesslich anhand des Strangschemas.
+
+    Die gemeinsame Excel darf gleichzeitig MIT1- und MIT2-Räume enthalten.
+    Sie wird deshalb selbst NICHT als falsches Gebäude abgelehnt.
+    """
+    allowed_buildings = _allowed_buildings_for_schema(
+        expected_building
+    )
+
+    expected = (
+        expected_building.strip().upper()
+        if expected_building
+        else None
+    )
+
+    detected = determine_document_building(
+        dataframe
+    )
+
+    if dataframe.empty:
+        return (
+            dataframe.copy(),
+            dataframe.copy(),
+            False,
+            detected,
+            "Keine gültigen Lastdaten erkannt.",
+        )
+
+    valid_mask = dataframe["gebaeude"].isin(
+        allowed_buildings
+    )
+
+    used = dataframe.loc[
+        valid_mask
+    ].copy()
+
+    other = dataframe.loc[
+        dataframe["gebaeude"].isin(
+            {"MIT1", "MIT2"}
+        )
+        & ~valid_mask
+    ].copy()
+
+    accepted = not used.empty
+
+    if accepted and other.empty:
+        reason = "OK"
+    elif accepted:
+        reason = (
+            f"Für {expected or 'MIT1/MIT2'} relevante Excel-Räume werden "
+            "ausgewertet. Räume des anderen Gebäudeteils werden nicht "
+            "in den Abgleich einbezogen."
+        )
+    else:
+        reason = (
+            f"Keine Excel-Räume passend zum Strangschema "
+            f"{expected or 'MIT1/MIT2'} gefunden."
+        )
+
+    if not other.empty:
+        other["zielgebaeude"] = expected
+        other["nicht_geprueft_grund"] = (
+            "Anderer Gebäudeteil als im Strangschema – "
+            "nicht in den Abgleich einbezogen"
+        )
+
+    return (
+        used,
+        other,
+        accepted,
+        detected,
+        reason,
+    )
+
+
+def extract_loads_from_excel_checked(
+    excel_path: str | Path,
+    mode: str = "beides",
+    expected_building: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Liest eine Heiz-/Kühllast-Excel und liefert dieselben DataFrame-Strukturen
+    wie die bestehende PDF-Extraktion.
+
+    mode:
+        "heizung"  -> nur Heizlast
+        "kuehlung" -> nur Kühllast
+        "beides"   -> Heiz- und Kühllast
+
+    Rückgabe:
+        heating_dataframe
+        cooling_dataframe
+        file_check_dataframe
+
+    Wichtig:
+    Excel-0-Werte sind echte 0-Werte und keine Marker.\n    Die Excel darf MIT1- und MIT2-Räume gleichzeitig enthalten.\n    Gefiltert wird ausschliesslich nach dem jeweiligen Strangschema.
+    """
+    normalized_mode = str(mode).strip().casefold()
+
+    if normalized_mode not in {
+        "heizung",
+        "kuehlung",
+        "beides",
+    }:
+        raise ValueError(
+            "mode muss 'heizung', 'kuehlung' oder 'beides' sein."
+        )
+
+    excel_path = Path(excel_path)
+
+    records = extract_loads_from_excel(
+        excel_path,
+        mode=normalized_mode,
+    )
+
+    heating_rows: list[dict] = []
+    cooling_rows: list[dict] = []
+
+    for record in records:
+        room_id = normalize_room_id(
+            record.raum_key
+        )
+
+        building = get_building_from_room(
+            room_id
+        )
+        level = get_level_from_room(
+            room_id
+        )
+
+        common = {
+            "raumnummer": room_id,
+            "raumname": None,
+            "ist_marker": False,
+            "marker_typ": None,
+            "gebaeude": building,
+            "ebene": level,
+            "datei": excel_path.name,
+            # Excel hat keine PDF-Seite. Die Excel-Zeile ist für die
+            # Nachvollziehbarkeit nützlicher und passt in die bestehende
+            # Integer-Spalte "seite".
+            "seite": int(record.excel_zeile),
+        }
+
+        if record.heizlast_w is not None:
+            heating_rows.append(
+                {
+                    **common,
+                    # Originalwert aus Excel bleibt mit Vorzeichen sichtbar.
+                    "leistung_w": int(
+                        (
+                            getattr(
+                                record,
+                                "heizlast_original_w",
+                                None,
+                            )
+                            if getattr(
+                                record,
+                                "heizlast_original_w",
+                                None,
+                            )
+                            is not None
+                            else record.heizlast_w
+                        )
+                    ),
+                    # Für den fachlichen Vergleich wird der Betrag verwendet.
+                    "vergleichswert_w": abs(
+                        int(
+                            record.heizlast_w
+                        )
+                    ),
+                    "lastart": "Heizlast",
+                }
+            )
+
+        if record.kuehllast_w is not None:
+            cooling_rows.append(
+                {
+                    **common,
+                    # Originalwert aus Excel bleibt mit Vorzeichen sichtbar.
+                    "leistung_w": int(
+                        (
+                            getattr(
+                                record,
+                                "kuehllast_original_w",
+                                None,
+                            )
+                            if getattr(
+                                record,
+                                "kuehllast_original_w",
+                                None,
+                            )
+                            is not None
+                            else record.kuehllast_w
+                        )
+                    ),
+                    # Für den fachlichen Vergleich wird der Betrag verwendet.
+                    "vergleichswert_w": abs(
+                        int(
+                            record.kuehllast_w
+                        )
+                    ),
+                    "lastart": "Kühllast",
+                }
+            )
+
+    heating_raw = (
+        pd.DataFrame(heating_rows)
+        if heating_rows
+        else _empty_load_dataframe()
+    )
+
+    cooling_raw = (
+        pd.DataFrame(cooling_rows)
+        if cooling_rows
+        else _empty_load_dataframe()
+    )
+
+    checks: list[dict] = []
+    not_checked_frames: list[pd.DataFrame] = []
+
+    def process_one(
+        raw: pd.DataFrame,
+        load_type: str,
+    ) -> pd.DataFrame:
+        if raw.empty:
+            return _empty_load_dataframe()
+
+        (
+            used,
+            other,
+            accepted,
+            detected,
+            reason,
+        ) = _filter_dataframe_for_expected_building(
+            raw,
+            expected_building,
+        )
+
+        if not other.empty:
+            other_copy = other.copy()
+            other_copy.attrs = {}
+            not_checked_frames.append(
+                other_copy
+            )
+
+        checks.append(
+            {
+                "datei": excel_path.name,
+                "pfad": str(excel_path),
+                "lastart": load_type,
+                "erkanntes_gebaeude": detected,
+                "erwartetes_gebaeude": (
+                    expected_building.upper()
+                    if expected_building
+                    else None
+                ),
+                "akzeptiert": accepted,
+                "grund": reason,
+                "anzahl_datensaetze": len(raw),
+                "anzahl_raeume": (
+                    raw["raumnummer"].nunique()
+                    if not raw.empty
+                    else 0
+                ),
+                "anzahl_raeume_verwendet": (
+                    used["raumnummer"].nunique()
+                    if not used.empty
+                    else 0
+                ),
+                "anzahl_raeume_anderes_gebaeude": (
+                    other["raumnummer"].nunique()
+                    if not other.empty
+                    else 0
+                ),
+            }
+        )
+
+        if not accepted:
+            return _empty_load_dataframe()
+
+        if used.empty:
+            return _empty_load_dataframe()
+
+        used = (
+            used
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+
+        used = _safe_sort_load_dataframe(
+            used
+        )
+
+        used.attrs = {}
+        return used
+
+    heating = process_one(
+        heating_raw,
+        "Heizlast",
+    )
+
+    cooling = process_one(
+        cooling_raw,
+        "Kühllast",
+    )
+
+    if not_checked_frames:
+        not_checked = (
+            pd.concat(
+                not_checked_frames,
+                ignore_index=True,
+            )
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+    else:
+        not_checked = pd.DataFrame()
+
+    heating.attrs[
+        "nicht_gepruefte_raeume"
+    ] = not_checked
+
+    cooling.attrs[
+        "nicht_gepruefte_raeume"
+    ] = not_checked
+
+    check_columns = [
+        "datei",
+        "pfad",
+        "lastart",
+        "erkanntes_gebaeude",
+        "erwartetes_gebaeude",
+        "akzeptiert",
+        "grund",
+        "anzahl_datensaetze",
+        "anzahl_raeume",
+        "anzahl_raeume_verwendet",
+        "anzahl_raeume_anderes_gebaeude",
+    ]
+
+    check_dataframe = pd.DataFrame(
+        checks,
+        columns=check_columns,
+    )
+
+    return (
+        heating,
+        cooling,
+        check_dataframe,
+    )
+
+
+def extract_loads_from_excels_checked(
+    excel_paths: Iterable[str | Path],
+    mode: str = "beides",
+    expected_building: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Liest mehrere Heiz-/Kühllast-Excel-Dateien ein und führt sie zu
+    einer gemeinsamen Lastquelle zusammen.
+
+    Jede Excel-Datei wird einzeln gelesen und für das aktuelle
+    Strangschema nach MIT1 / MIT2 / MIT12 gefiltert.
+
+    Wichtig:
+    - Die Herkunftsdatei bleibt in der Spalte "datei" erhalten.
+    - Derselbe Raum darf in mehreren Excel-Dateien vorkommen.
+    - Gleiche Werte in mehreren Dateien bleiben fachlich eindeutig.
+    - Unterschiedliche Werte für denselben Raum werden später im
+      Vergleich als "mehrfach / prüfen" erkannt.
+    """
+    paths = [
+        Path(path)
+        for path in excel_paths
+    ]
+
+    if not paths:
+        raise ValueError(
+            "Mindestens eine Excel-Datei muss ausgewählt werden."
+        )
+
+    heating_frames: list[pd.DataFrame] = []
+    cooling_frames: list[pd.DataFrame] = []
+    check_frames: list[pd.DataFrame] = []
+    not_checked_frames: list[pd.DataFrame] = []
+
+    for excel_path in paths:
+        (
+            heating,
+            cooling,
+            checks,
+        ) = extract_loads_from_excel_checked(
+            excel_path=excel_path,
+            mode=mode,
+            expected_building=expected_building,
+        )
+
+        for dataframe, target in (
+            (heating, heating_frames),
+            (cooling, cooling_frames),
+        ):
+            not_checked = dataframe.attrs.get(
+                "nicht_gepruefte_raeume"
+            )
+
+            if (
+                isinstance(not_checked, pd.DataFrame)
+                and not not_checked.empty
+            ):
+                frame = not_checked.copy()
+                frame.attrs = {}
+                not_checked_frames.append(
+                    frame
+                )
+
+            if not dataframe.empty:
+                frame = dataframe.copy()
+                frame.attrs = {}
+                target.append(
+                    frame
+                )
+
+        if not checks.empty:
+            check_frames.append(
+                checks.copy()
+            )
+
+    def combine_load_frames(
+        frames: list[pd.DataFrame],
+    ) -> pd.DataFrame:
+        if not frames:
+            return _empty_load_dataframe()
+
+        # KEIN Zusammenfassen nach Raumnummer:
+        # Wir wollen bewusst sehen, wenn derselbe Raum in mehreren
+        # Excel-Dateien vorkommt. Nur vollständig identische Zeilen
+        # derselben Quelle werden entfernt.
+        combined = (
+            pd.concat(
+                frames,
+                ignore_index=True,
+            )
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+
+        return _safe_sort_load_dataframe(
+            combined
+        )
+
+    heating_combined = combine_load_frames(
+        heating_frames
+    )
+    cooling_combined = combine_load_frames(
+        cooling_frames
+    )
+
+    if not_checked_frames:
+        not_checked_combined = (
+            pd.concat(
+                not_checked_frames,
+                ignore_index=True,
+            )
+            .drop_duplicates()
+            .sort_values(
+                [
+                    "gebaeude",
+                    "ebene",
+                    "raumnummer",
+                    "datei",
+                    "seite",
+                ]
+            )
+            .reset_index(drop=True)
+        )
+    else:
+        not_checked_combined = pd.DataFrame()
+
+    heating_combined.attrs[
+        "nicht_gepruefte_raeume"
+    ] = not_checked_combined
+
+    cooling_combined.attrs[
+        "nicht_gepruefte_raeume"
+    ] = not_checked_combined
+
+    if check_frames:
+        check_dataframe = (
+            pd.concat(
+                check_frames,
+                ignore_index=True,
+            )
+            .reset_index(drop=True)
+        )
+    else:
+        check_dataframe = pd.DataFrame()
+
+    return (
+        heating_combined,
+        cooling_combined,
+        check_dataframe,
     )
 
 
@@ -1986,6 +2438,8 @@ def _consolidate_ground_load(
         "marker_typ": None,
         "raumname": None,
         "dateien": "",
+        "anzahl_dateien": 0,
+        "mehrere_dateien": False,
     }
 
     if dataframe.empty:
@@ -2092,6 +2546,8 @@ def _consolidate_ground_load(
         "marker_typ": marker_typ,
         "raumname": room_name,
         "dateien": " | ".join(files),
+        "anzahl_dateien": len(files),
+        "mehrere_dateien": len(files) > 1,
     }
 
 
@@ -2210,7 +2666,10 @@ def _overall_comparison_status(
     meaningful = {
         status
         for status in statuses
-        if status != "Nicht vorhanden"
+        if status not in {
+            "Nicht vorhanden",
+            "Nicht geprüft",
+        }
     }
 
     # Ein Raum kann z. B. Heizung = OK und Kühlung = Keine Leistung haben.
@@ -2238,15 +2697,10 @@ def get_selected_comparison_levels(
     cooling: pd.DataFrame,
 ) -> list[str]:
     """
-    Ermittelt die Ebenen, für die tatsächlich
-    Heizlast- oder Kühllast-Grundrisse ausgewählt wurden.
+    Nur noch Informationsfunktion für den Export.
 
-    Beispiel:
-        Heizlast H + J
-        Kühllast H + J
-        -> ["H", "J"]
+    Die Ebenen beschränken den Vergleich NICHT mehr.
     """
-
     levels: set[str] = set()
 
     for dataframe in (
@@ -2266,10 +2720,7 @@ def get_selected_comparison_levels(
         ):
             level = value.strip().upper()
 
-            if (
-                level
-                and level != "?"
-            ):
+            if level and level != "?":
                 levels.add(level)
 
     return sorted(levels)
@@ -2281,27 +2732,22 @@ def get_comparison_scope(
     consolidated_schema: pd.DataFrame,
 ) -> dict:
     """
-    Gibt den Umfang des Lastvergleichs transparent zurück.
+    Der Vergleich wird NICHT mehr anhand ausgewählter Ebenen begrenzt.
 
-    Wichtig:
-    Es werden nur Schema-Räume der Ebenen berücksichtigt,
-    für die mindestens ein Heizlast- oder Kühllast-Grundriss
-    ausgewählt wurde.
+    Für jedes Strangschema werden alle Räume dieses Schemas mit den
+    vorhandenen Lastdaten abgeglichen. Der einzige fachliche Ausschluss
+    erfolgt vorher anhand des Gebäudeumfangs MIT1 / MIT2 / MIT12.
     """
-
-    selected_levels = (
-        get_selected_comparison_levels(
-            heating,
-            cooling,
-        )
+    source_levels = get_selected_comparison_levels(
+        heating,
+        cooling,
     )
 
     schema_levels: list[str] = []
 
     if (
         not consolidated_schema.empty
-        and "ebene"
-        in consolidated_schema.columns
+        and "ebene" in consolidated_schema.columns
     ):
         schema_levels = sorted(
             {
@@ -2312,37 +2758,24 @@ def get_comparison_scope(
                 ].dropna()
                 if (
                     str(value).strip()
-                    and str(value).strip()
-                    != "?"
+                    and str(value).strip() != "?"
                 )
             }
         )
 
-    ignored_schema_levels = sorted(
-        set(schema_levels)
-        - set(selected_levels)
-    )
-
     note = (
-        "Hinweis: Verglichen werden nur die Ebenen, "
-        "für die Heizlast- oder Kühllast-Grundrisse "
-        "ausgewählt wurden. Räume anderer Ebenen aus "
-        "dem Strangschema werden in diesem Vergleich "
-        "nicht berücksichtigt."
+        "Verglichen werden alle Räume des jeweiligen Strangschemas. "
+        "Die Ebene ist kein Ausschlusskriterium. Aus Lastquellen werden "
+        "nur Räume ausgeschlossen, die zu einem anderen Gebäudeteil als "
+        "das Strangschema gehören."
     )
 
     return {
-        "beruecksichtigte_ebenen":
-            selected_levels,
-
-        "schema_ebenen_gesamt":
-            schema_levels,
-
-        "ausgeschlossene_schema_ebenen":
-            ignored_schema_levels,
-
-        "hinweis":
-            note,
+        "beruecksichtigte_ebenen": schema_levels,
+        "lastdaten_ebenen": source_levels,
+        "schema_ebenen_gesamt": schema_levels,
+        "ausgeschlossene_schema_ebenen": [],
+        "hinweis": note,
     }
 
 
@@ -2350,22 +2783,22 @@ def compare_loads_with_schema(
     heating: pd.DataFrame,
     cooling: pd.DataFrame,
     consolidated_schema: pd.DataFrame,
+    compare_heating: bool = True,
+    compare_cooling: bool = True,
 ) -> pd.DataFrame:
     """
     Führt Heizlast-Grundrisse, Kühllast-Grundrisse
     und konsolidiertes Strangschema zusammen.
 
-    SEHR WICHTIGER VERGLEICHSUMFANG:
-    Es werden nur diejenigen Ebenen des Strangschemas
-    berücksichtigt, für die mindestens ein Heizlast-
-    oder Kühllast-Grundriss ausgewählt wurde.
+    VERGLEICHSUMFANG:
+    Es werden alle Räume des jeweiligen Strangschemas berücksichtigt.
+    Die Ebene ist kein Ausschlusskriterium.
 
-    Beispiel:
-        Grundrisse H + J ausgewählt
-        -> Schema wird nur für H + J verglichen.
-
-    Andere Ebenen des Strangschemas gelten in diesem
-    Lauf ausdrücklich als NICHT geprüft.
+    Lastdaten des anderen Gebäudeteils werden bereits beim Einlesen
+    ausgeschlossen:
+        MIT1-Schema  -> MIT1
+        MIT2-Schema  -> MIT2
+        MIT12-Schema -> MIT1 + MIT2
 
     Fachliche Regeln:
 
@@ -2375,6 +2808,39 @@ def compare_loads_with_schema(
     Ein 0-W-Grundrisswert braucht keinen Schemaeintrag.
     Ein 0-W-Schemawert braucht keinen Grundrisseintrag.
     """
+
+    if not compare_heating and not compare_cooling:
+        raise ValueError(
+            "Mindestens Heizlast oder Kühllast muss für den Vergleich aktiviert sein."
+        )
+
+    # --------------------------------------------------------
+    # STRANGSCHEMA SELBST AUF SEINEN ERKANNTEN GEBÄUDEUMFANG FILTERN
+    # --------------------------------------------------------
+    #
+    # Beispiel:
+    # Ein MIT1-Strangschema kann einzelne alte MIT2-Räume enthalten.
+    # Diese dürfen den fachlichen Vergleich nicht beeinflussen.
+    #
+    # Ein echtes MIT12-Strangschema behält dagegen MIT1 + MIT2.
+
+    schema_building = determine_document_building(
+        consolidated_schema
+    )
+
+    if schema_building not in {
+        "MIT1",
+        "MIT2",
+        "MIT12",
+    }:
+        raise ValueError(
+            "Gebäudeumfang des Strangschemas konnte nicht eindeutig erkannt werden."
+        )
+
+    consolidated_schema = filter_schema_for_building(
+        consolidated_schema,
+        schema_building,
+    )
 
     required_schema_columns = {
         "raumnummer",
@@ -2440,34 +2906,18 @@ def compare_loads_with_schema(
         "beruecksichtigte_ebenen"
     ]
 
-    if not selected_levels:
-        raise ValueError(
-            "Es wurden keine gültigen Ebenen aus "
-            "Heizlast- oder Kühllast-Grundrissen erkannt. "
-            "Ohne ausgewählte Grundriss-Ebene kann kein "
-            "Lastvergleich durchgeführt werden."
-        )
-
     # --------------------------------------------------------
-    # STRANGSCHEMA AUF TATSÄCHLICH GEPRÜFTE EBENEN BESCHRÄNKEN
+    # KEIN EBENENFILTER MEHR
     # --------------------------------------------------------
+    # Das vollständige Strangschema wird verglichen.
+    # Räume ohne passenden Lastdatensatz erscheinen entsprechend
+    # als "Nur im Schema". Ausschlüsse aufgrund eines anderen
+    # Gebäudeteils erfolgen bereits beim Einlesen der Lastquelle.
 
     schema_for_comparison = (
-        consolidated_schema.loc[
-            consolidated_schema[
-                "ebene"
-            ]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            .isin(
-                selected_levels
-            )
-        ]
+        consolidated_schema
         .copy()
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
     room_ids = set()
@@ -2619,23 +3069,75 @@ def compare_loads_with_schema(
                 )
             )
 
-        (
-            heating_status,
-            heating_difference,
-        ) = _compare_single_load(
-            heating_info,
-            schema_q_h,
-            schema_unique,
-        )
+        if compare_heating:
+            (
+                heating_status,
+                heating_difference,
+            ) = _compare_single_load(
+                heating_info,
+                schema_q_h,
+                schema_unique,
+            )
+        else:
+            heating_status = "Nicht geprüft"
+            heating_difference = None
 
-        (
-            cooling_status,
-            cooling_difference,
-        ) = _compare_single_load(
-            cooling_info,
-            schema_q_k,
-            schema_unique,
-        )
+        if compare_cooling:
+            # Kühllasten können je nach Quelle mit unterschiedlichem
+            # Vorzeichen vorliegen:
+            # - PDF-Grundriss typischerweise negativ
+            # - Excel-Import als Betrag positiv
+            # - Strangschema typischerweise negativ
+            #
+            # Fachlich wird deshalb für den Kühllastvergleich auf BEIDEN
+            # Seiten nur der Betrag verwendet. Die Originalwerte bleiben
+            # im Export unverändert sichtbar.
+
+            cooling_info_for_comparison = (
+                cooling_info.copy()
+            )
+
+            if (
+                cooling_info_for_comparison[
+                    "vergleichswert_w"
+                ]
+                is not None
+            ):
+                cooling_info_for_comparison[
+                    "vergleichswert_w"
+                ] = abs(
+                    int(
+                        cooling_info_for_comparison[
+                            "vergleichswert_w"
+                        ]
+                    )
+                )
+
+            normalized_schema_q_k = (
+                _normalize_optional_int(
+                    schema_q_k
+                )
+            )
+
+            schema_q_k_for_comparison = (
+                None
+                if normalized_schema_q_k is None
+                else abs(
+                    normalized_schema_q_k
+                )
+            )
+
+            (
+                cooling_status,
+                cooling_difference,
+            ) = _compare_single_load(
+                cooling_info_for_comparison,
+                schema_q_k_for_comparison,
+                schema_unique,
+            )
+        else:
+            cooling_status = "Nicht geprüft"
+            cooling_difference = None
 
         overall_status = (
             _overall_comparison_status(
@@ -2745,10 +3247,38 @@ def compare_loads_with_schema(
                         "dateien"
                     ],
 
+                "anzahl_dateien_heizlast":
+                    heating_info[
+                        "anzahl_dateien"
+                    ],
+
+                "mehrere_dateien_heizlast":
+                    (
+                        "Ja"
+                        if heating_info[
+                            "mehrere_dateien"
+                        ]
+                        else "Nein"
+                    ),
+
                 "datei_kuehllast":
                     cooling_info[
                         "dateien"
                     ],
+
+                "anzahl_dateien_kuehllast":
+                    cooling_info[
+                        "anzahl_dateien"
+                    ],
+
+                "mehrere_dateien_kuehllast":
+                    (
+                        "Ja"
+                        if cooling_info[
+                            "mehrere_dateien"
+                        ]
+                        else "Nein"
+                    ),
 
                 "datei_schema":
                     schema_file,
@@ -2890,4 +3420,89 @@ def compare_loads_with_schema(
         "nicht_gepruefte_raeume"
     ] = not_checked_rooms
 
+    result.attrs[
+        "heizlast_geprueft"
+    ] = bool(compare_heating)
+
+    result.attrs[
+        "kuehllast_geprueft"
+    ] = bool(compare_cooling)
+
     return result
+
+# ============================================================
+# MEHRERE STRANGSCHEMATA
+# ============================================================
+
+def prepare_comparisons_for_schemas(
+    schema_paths: Iterable[str | Path],
+    heating: pd.DataFrame,
+    cooling: pd.DataFrame,
+    compare_heating: bool = True,
+    compare_cooling: bool = True,
+) -> list[dict]:
+    """
+    Bereitet für jedes ausgewählte Strangschema einen eigenen Vergleich vor.
+
+    Diese Funktion führt bewusst noch keinen Excel-Export aus.
+    Die GUI kann dadurch für jedes Ergebnis separat eine Ausgabedatei erzeugen.
+
+    Rückgabe je Schema:
+        schema_path
+        building
+        schema
+        comparison
+
+    Hinweis:
+    heating/cooling müssen für das jeweilige Schema bereits passend nach
+    MIT1/MIT2/MIT12 gefiltert sein. Für PDF- oder Excel-Quellen geschieht
+    das über check_pdf_building()/extract_loads_from_pdfs_checked() bzw.
+    extract_loads_from_excel_checked().
+    """
+    results: list[dict] = []
+
+    for schema_path in schema_paths:
+        schema_path = Path(schema_path)
+
+        schema = extract_and_consolidate_schema(
+            schema_path
+        )
+
+        building = determine_document_building(
+            schema
+        )
+
+        if building not in {
+            "MIT1",
+            "MIT2",
+            "MIT12",
+        }:
+            raise ValueError(
+                f"Gebäudeumfang des Strangschemas konnte nicht erkannt werden: "
+                f"{schema_path.name}"
+            )
+
+        schema = filter_schema_for_building(
+            schema,
+            building,
+        )
+
+        comparison = compare_loads_with_schema(
+            heating=heating,
+            cooling=cooling,
+            consolidated_schema=schema,
+            compare_heating=compare_heating,
+            compare_cooling=compare_cooling,
+        )
+
+        results.append(
+            {
+                "schema_path": schema_path,
+                "building": building,
+                "schema": schema,
+                "comparison": comparison,
+            }
+        )
+
+    return results
+

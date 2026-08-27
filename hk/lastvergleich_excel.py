@@ -266,16 +266,9 @@ def _write_overview_sheet(
     heating_pdfs: Iterable[str | Path],
     cooling_pdfs: Iterable[str | Path],
     building: str,
+    source_type: str = "pdf",
+    comparison_scope: str = "beides",
 ) -> None:
-    """
-    Erstellt die Übersichtsseite.
-
-    Die Zeilen werden bewusst dynamisch aufgebaut, damit sich
-    zusammengeführte Zellen nicht mit späteren Inhalten überschneiden.
-    Dadurch wird der openpyxl-Fehler
-    "'MergedCell' object attribute 'value' is read-only"
-    vermieden.
-    """
     ws = workbook.active
     ws.title = "Übersicht"
 
@@ -303,46 +296,16 @@ def _write_overview_sheet(
         ),
     )
 
-    not_checked = comparison.attrs.get(
-        "nicht_gepruefte_raeume"
-    )
-
-    not_checked_count = (
-        int(
-            not_checked[
-                "raumnummer"
-            ].nunique()
-        )
-        if (
-            isinstance(
-                not_checked,
-                pd.DataFrame,
-            )
-            and not not_checked.empty
-            and "raumnummer"
-            in not_checked.columns
-        )
-        else 0
-    )
-
-    # --------------------------------------------------------
-    # TITEL
-    # --------------------------------------------------------
-
     ws.merge_cells(
         "A1:F1"
     )
 
-    ws[
-        "A1"
-    ] = (
-        "Lastvergleich Grundriss ↔ Strangschema"
+    ws["A1"] = (
+        "Lastvergleich Lastquelle ↔ Strangschema"
     )
 
     _style_title(
-        ws[
-            "A1"
-        ]
+        ws["A1"]
     )
 
     ws.row_dimensions[
@@ -353,26 +316,60 @@ def _write_overview_sheet(
     # VERGLEICHSUMFANG
     # --------------------------------------------------------
 
-    section_row = 3
-
     ws.merge_cells(
-        start_row=section_row,
-        start_column=1,
-        end_row=section_row,
-        end_column=6,
+        "A3:F3"
     )
 
-    ws.cell(
-        section_row,
-        1,
-        "Vergleichsumfang",
+    ws["A3"] = (
+        "Vergleichsumfang"
     )
 
     _style_section_header(
-        ws.cell(
-            section_row,
-            1,
+        ws["A3"]
+    )
+
+    not_checked = comparison.attrs.get(
+        "nicht_gepruefte_raeume"
+    )
+
+    not_checked_count = (
+        int(
+            not_checked["raumnummer"].nunique()
         )
+        if (
+            isinstance(
+                not_checked,
+                pd.DataFrame,
+            )
+            and not not_checked.empty
+            and "raumnummer" in not_checked.columns
+        )
+        else 0
+    )
+
+    source_label = (
+        "Excel"
+        if source_type == "excel"
+        else "PDF-Grundrisse"
+    )
+
+    scope_label = {
+        "heizung": "nur Heizlast",
+        "kuehlung": "nur Kühllast",
+        "beides": "Heiz- und Kühllast",
+    }.get(
+        comparison_scope,
+        comparison_scope,
+    )
+
+
+    source_note = (
+        "Bei mehreren Excel-Dateien bleibt pro Raum sichtbar, in welcher "
+        "Datei bzw. in welchen Dateien er gefunden wurde. Unterschiedliche "
+        "Werte für denselben Raum werden als Mehrfachfall zur Prüfung markiert."
+        if source_type == "excel"
+        else
+        "Bei mehreren PDF-Dateien bleibt pro Raum die jeweilige Funddatei sichtbar."
     )
 
     overview_rows = [
@@ -381,24 +378,16 @@ def _write_overview_sheet(
             building,
         ),
         (
-            "Berücksichtigte Ebenen",
-            (
-                ", ".join(
-                    considered_levels
-                )
-                if considered_levels
-                else "-"
-            ),
+            "Lastquelle",
+            source_label,
         ),
         (
-            "Nicht geprüfte Schema-Ebenen",
-            (
-                ", ".join(
-                    ignored_levels
-                )
-                if ignored_levels
-                else "keine"
-            ),
+            "Prüfumfang",
+            scope_label,
+        ),
+        (
+            "Hinweis Quelldateien",
+            source_note,
         ),
         (
             "Räume anderes Gebäude (nicht geprüft)",
@@ -408,237 +397,226 @@ def _write_overview_sheet(
             "WICHTIGER HINWEIS",
             (
                 note
-                + " Gemischte MIT12-Grundrisse werden akzeptiert: "
-                + f"{building}-Räume werden verglichen; Räume des anderen "
-                + "Gebäudeteils werden im Blatt «Nicht geprüft» dokumentiert "
+                + " Räume eines anderen Gebäudeteils als das jeweilige "
+                + "Strangschema werden im Blatt «Nicht geprüft» dokumentiert "
                 + "und nicht als Fehler gewertet."
             ),
         ),
     ]
 
-    current_row = section_row + 1
+    start_row = 4
 
-    for label, value in overview_rows:
+    for index, (
+        label,
+        value,
+    ) in enumerate(
+        overview_rows,
+        start=start_row,
+    ):
         ws.cell(
-            current_row,
+            index,
             1,
             label,
         )
 
         ws.cell(
-            current_row,
+            index,
+            2,
+            value,
+        )
+
+        ws.merge_cells(
+            start_row=index,
+            start_column=2,
+            end_row=index,
+            end_column=6,
+        )
+
+        ws.cell(
+            index,
             1,
         ).font = Font(
             bold=True,
         )
 
-        # Erst verbinden, dann nur die linke obere Zelle beschreiben.
-        ws.merge_cells(
-            start_row=current_row,
-            start_column=2,
-            end_row=current_row,
-            end_column=6,
-        )
-
-        value_cell = ws.cell(
-            current_row,
+        ws.cell(
+            index,
             2,
-        )
-
-        value_cell.value = value
-
-        value_cell.alignment = Alignment(
+        ).alignment = Alignment(
             wrap_text=True,
             vertical="top",
         )
 
-        if label == "WICHTIGER HINWEIS":
-            ws.cell(
-                current_row,
-                1,
-            ).fill = PatternFill(
-                "solid",
-                fgColor=YELLOW,
-            )
-
-            ws.cell(
-                current_row,
-                1,
-            ).font = Font(
-                bold=True,
-                color=YELLOW_TEXT,
-            )
-
-            value_cell.fill = PatternFill(
-                "solid",
-                fgColor=YELLOW,
-            )
-
-            value_cell.font = Font(
-                bold=True,
-                color=YELLOW_TEXT,
-            )
-
-            ws.row_dimensions[
-                current_row
-            ].height = 55
-
-        current_row += 1
-
-    # --------------------------------------------------------
-    # VERWENDETE DATEIEN
-    # --------------------------------------------------------
-
-    current_row += 1
-
-    ws.merge_cells(
-        start_row=current_row,
-        start_column=1,
-        end_row=current_row,
-        end_column=6,
+    ws[
+        "A8"
+    ].fill = PatternFill(
+        "solid",
+        fgColor=YELLOW,
     )
 
-    ws.cell(
-        current_row,
-        1,
-        "Verwendete Dateien",
+    ws[
+        "A8"
+    ].font = Font(
+        bold=True,
+        color=YELLOW_TEXT,
+    )
+
+    ws[
+        "B8"
+    ].fill = PatternFill(
+        "solid",
+        fgColor=YELLOW,
+    )
+
+    ws[
+        "B8"
+    ].font = Font(
+        bold=True,
+        color=YELLOW_TEXT,
+    )
+
+    ws.row_dimensions[
+        8
+    ].height = 45
+
+    # --------------------------------------------------------
+    # DATEIEN
+    # --------------------------------------------------------
+
+    ws.merge_cells(
+        "A10:F10"
+    )
+
+    ws["A10"] = (
+        "Verwendete Dateien"
     )
 
     _style_section_header(
-        ws.cell(
-            current_row,
-            1,
-        )
+        ws["A10"]
     )
 
-    current_row += 1
+    if source_type == "excel":
+        excel_files = list(
+            heating_pdfs
+        ) or list(
+            cooling_pdfs
+        )
 
-    file_rows = [
-        (
-            "Strangschema",
-            Path(
-                schema_pdf
-            ).name,
-        ),
-        (
-            "Heizlast-Grundrisse",
-            _join_file_names(
-                heating_pdfs
+        file_rows = [
+            (
+                "Strangschema",
+                Path(schema_pdf).name,
             ),
-        ),
-        (
-            "Kühllast-Grundrisse",
-            _join_file_names(
-                cooling_pdfs
+            (
+                "Heiz-/Kühllast-Excel-Datei(en)",
+                _join_file_names(
+                    excel_files
+                ),
             ),
-        ),
-    ]
+        ]
+    else:
+        file_rows = [
+            (
+                "Strangschema",
+                Path(schema_pdf).name,
+            ),
+        ]
 
-    for label, value in file_rows:
+        if comparison_scope in {
+            "heizung",
+            "beides",
+        }:
+            file_rows.append(
+                (
+                    "Heizlast-Grundrisse",
+                    _join_file_names(
+                        heating_pdfs
+                    ),
+                )
+            )
+
+        if comparison_scope in {
+            "kuehlung",
+            "beides",
+        }:
+            file_rows.append(
+                (
+                    "Kühllast-Grundrisse",
+                    _join_file_names(
+                        cooling_pdfs
+                    ),
+                )
+            )
+
+    for index, (
+        label,
+        value,
+    ) in enumerate(
+        file_rows,
+        start=11,
+    ):
         ws.cell(
-            current_row,
+            index,
             1,
             label,
         )
 
         ws.cell(
-            current_row,
+            index,
             1,
         ).font = Font(
             bold=True,
         )
 
+        ws.cell(
+            index,
+            2,
+            value,
+        )
+
         ws.merge_cells(
-            start_row=current_row,
+            start_row=index,
             start_column=2,
-            end_row=current_row,
+            end_row=index,
             end_column=6,
         )
 
-        value_cell = ws.cell(
-            current_row,
+        ws.cell(
+            index,
             2,
-        )
-
-        value_cell.value = value
-
-        value_cell.alignment = Alignment(
+        ).alignment = Alignment(
             wrap_text=True,
             vertical="top",
         )
 
+        # Zeilenhöhe automatisch an die Anzahl der Dateinamen anpassen,
+        # damit bei mehreren Grundrissen alle Dateien sichtbar sind.
         line_count = max(
             1,
-            str(
-                value
-            ).count(
-                "\n"
-            )
-            + 1,
+            str(value).count("\n") + 1,
         )
 
         ws.row_dimensions[
-            current_row
+            index
         ].height = max(
             18,
-            15
-            * line_count,
+            15 * line_count,
         )
 
-        current_row += 1
-
     # --------------------------------------------------------
-    # ERGEBNISÜBERSICHT
+    # STATUSZUSAMMENFASSUNG
     # --------------------------------------------------------
-
-    current_row += 1
 
     ws.merge_cells(
-        start_row=current_row,
-        start_column=1,
-        end_row=current_row,
-        end_column=6,
+        "A15:F15"
     )
 
-    ws.cell(
-        current_row,
-        1,
-        "Ergebnisübersicht",
+    ws["A15"] = (
+        "Ergebnisübersicht"
     )
 
     _style_section_header(
-        ws.cell(
-            current_row,
-            1,
-        )
-    )
-
-    current_row += 1
-
-    ws.cell(
-        current_row,
-        1,
-        "Status",
-    )
-
-    ws.cell(
-        current_row,
-        2,
-        "Anzahl",
-    )
-
-    _style_table_header(
-        ws.cell(
-            current_row,
-            1,
-        )
-    )
-
-    _style_table_header(
-        ws.cell(
-            current_row,
-            2,
-        )
+        ws["A15"]
     )
 
     status_order = [
@@ -658,7 +636,27 @@ def _write_overview_sheet(
         .to_dict()
     )
 
-    current_row += 1
+    ws[
+        "A16"
+    ] = "Status"
+
+    ws[
+        "B16"
+    ] = "Anzahl"
+
+    _style_table_header(
+        ws[
+            "A16"
+        ]
+    )
+
+    _style_table_header(
+        ws[
+            "B16"
+        ]
+    )
+
+    current_row = 17
 
     for status in status_order:
         count = int(
@@ -701,47 +699,39 @@ def _write_overview_sheet(
 
         current_row += 1
 
-    current_row += 1
-
     ws.cell(
-        current_row,
+        current_row + 1,
         1,
         "Vergleichte Räume",
     )
 
     ws.cell(
-        current_row,
+        current_row + 1,
         2,
         len(
             comparison
         ),
     )
 
-    current_row += 1
-
     ws.cell(
-        current_row,
+        current_row + 2,
         1,
         "Erstellt am",
     )
 
     ws.cell(
-        current_row,
+        current_row + 2,
         2,
         datetime.now().strftime(
             "%d.%m.%Y %H:%M"
         ),
     )
 
-    # --------------------------------------------------------
-    # LAYOUT
-    # --------------------------------------------------------
-
     ws.freeze_panes = "A4"
 
     ws.column_dimensions[
         "A"
-    ].width = 34
+    ].width = 30
 
     for col in (
         "B",
@@ -777,7 +767,7 @@ def _write_comparison_sheet(
             "raumname",
         ),
         (
-            "Heizlast Grundriss Original [W]",
+            "Heizlast Quelle Original [W]",
             "heizlast_original_w",
         ),
         (
@@ -801,7 +791,7 @@ def _write_comparison_sheet(
             "heizlast_marker_typ",
         ),
         (
-            "Kühllast Grundriss Original [W]",
+            "Kühllast Quelle Original [W]",
             "kuehllast_original_w",
         ),
         (
@@ -837,12 +827,28 @@ def _write_comparison_sheet(
             "status_gesamt",
         ),
         (
-            "Heizlast-Datei",
+            "Heizlast Funddatei(en)",
             "datei_heizlast",
         ),
         (
-            "Kühllast-Datei",
+            "Anzahl Heizlast-Dateien",
+            "anzahl_dateien_heizlast",
+        ),
+        (
+            "Heizlast in mehreren Dateien",
+            "mehrere_dateien_heizlast",
+        ),
+        (
+            "Kühllast Funddatei(en)",
             "datei_kuehllast",
+        ),
+        (
+            "Anzahl Kühllast-Dateien",
+            "anzahl_dateien_kuehllast",
+        ),
+        (
+            "Kühllast in mehreren Dateien",
+            "mehrere_dateien_kuehllast",
         ),
         (
             "Schema-Datei",
@@ -885,24 +891,121 @@ def _write_comparison_sheet(
     }
 
     for _, row in comparison.iterrows():
-        ws.append(
-            [
-                (
-                    _safe_number(
-                        row.get(
-                            key
-                        )
-                    )
-                    if key
-                    in numeric_keys
-                    else _safe_text(
-                        row.get(
-                            key
-                        )
+        row_values = []
+
+        for key in keys:
+            value = row.get(
+                key
+            )
+
+            # Rückwärtskompatibel:
+            # Falls die Vergleichstabelle die neuen Zählfelder noch nicht
+            # explizit enthält, werden sie aus den Funddatei-Spalten
+            # abgeleitet.
+            if key == "anzahl_dateien_heizlast":
+                source_text = _safe_text(
+                    row.get(
+                        "datei_heizlast"
                     )
                 )
-                for key in keys
-            ]
+                value = (
+                    len(
+                        [
+                            part
+                            for part in source_text.split(" | ")
+                            if part.strip()
+                        ]
+                    )
+                    if source_text
+                    else 0
+                )
+
+            elif key == "mehrere_dateien_heizlast":
+                source_text = _safe_text(
+                    row.get(
+                        "datei_heizlast"
+                    )
+                )
+                count = (
+                    len(
+                        [
+                            part
+                            for part in source_text.split(" | ")
+                            if part.strip()
+                        ]
+                    )
+                    if source_text
+                    else 0
+                )
+                value = (
+                    "Ja"
+                    if count > 1
+                    else (
+                        "Nein"
+                        if count == 1
+                        else ""
+                    )
+                )
+
+            elif key == "anzahl_dateien_kuehllast":
+                source_text = _safe_text(
+                    row.get(
+                        "datei_kuehllast"
+                    )
+                )
+                value = (
+                    len(
+                        [
+                            part
+                            for part in source_text.split(" | ")
+                            if part.strip()
+                        ]
+                    )
+                    if source_text
+                    else 0
+                )
+
+            elif key == "mehrere_dateien_kuehllast":
+                source_text = _safe_text(
+                    row.get(
+                        "datei_kuehllast"
+                    )
+                )
+                count = (
+                    len(
+                        [
+                            part
+                            for part in source_text.split(" | ")
+                            if part.strip()
+                        ]
+                    )
+                    if source_text
+                    else 0
+                )
+                value = (
+                    "Ja"
+                    if count > 1
+                    else (
+                        "Nein"
+                        if count == 1
+                        else ""
+                    )
+                )
+
+            row_values.append(
+                (
+                    _safe_number(
+                        value
+                    )
+                    if key in numeric_keys
+                    else _safe_text(
+                        value
+                    )
+                )
+            )
+
+        ws.append(
+            row_values
         )
 
     header_map = {
@@ -1199,7 +1302,7 @@ def _write_not_checked_rooms_sheet(
     comparison: pd.DataFrame,
 ) -> None:
     """
-    Dokumentiert Räume aus gemischten MIT12-Grundrissen,
+    Dokumentiert Räume aus der Lastquelle,
     die zum anderen Gebäudeteil gehören.
 
     Beispiel:
@@ -1221,7 +1324,7 @@ def _write_not_checked_rooms_sheet(
     )
 
     ws["A1"] = (
-        "Nicht geprüfte Räume aus gemischten MIT12-Grundrissen"
+        "Nicht geprüfte Räume aus anderem Gebäudeteil"
     )
 
     _style_title(
@@ -1233,10 +1336,9 @@ def _write_not_checked_rooms_sheet(
     )
 
     ws["A3"] = (
-        "Diese Räume wurden im ausgewählten Heizlast-/Kühllast-Grundriss "
-        "gefunden, gehören aber zu einem anderen Gebäudeteil als das "
-        "gewählte Strangschema. Sie werden deshalb dokumentiert, aber "
-        "nicht verglichen und nicht als Fehler gewertet."
+        "Diese Räume wurden in der gewählten Lastquelle gefunden, gehören "
+        "aber zu einem anderen Gebäudeteil als das jeweilige Strangschema. "
+        "Sie werden dokumentiert, aber nicht verglichen und nicht als Fehler gewertet."
     )
 
     ws["A3"].fill = PatternFill(
@@ -1409,6 +1511,8 @@ def export_load_comparison_excel(
     building: str,
     heating_check: pd.DataFrame | None = None,
     cooling_check: pd.DataFrame | None = None,
+    source_type: str = "pdf",
+    comparison_scope: str = "beides",
 ) -> Path:
     """
     Erstellt die Excel-Ausgabe für den Lastvergleich.
@@ -1442,6 +1546,8 @@ def export_load_comparison_excel(
         heating_pdfs,
         cooling_pdfs,
         building,
+        source_type=source_type,
+        comparison_scope=comparison_scope,
     )
 
     _write_comparison_sheet(
